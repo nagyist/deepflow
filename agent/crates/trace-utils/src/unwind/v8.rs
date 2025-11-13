@@ -36,10 +36,7 @@ use crate::{
 
 use super::v8_symbolizer::{V8FrameMetadata, V8Symbolizer};
 
-// V8 stack merging constants
-// const INCOMPLETE_V8_STACK: &'static str = "[lost] incomplete V8 c stack"; // Currently unused
-
-// V8 Frame type constants (matching OpenTelemetry implementation)
+// V8 Frame type constants
 // Public constants for reuse in v8_symbolizer module
 pub const V8_FILE_TYPE_MASK: u64 = 0x7;
 pub const V8_FILE_TYPE_MARKER: u64 = 0x0;
@@ -113,9 +110,12 @@ impl MappedFile {
 
     thread_local! {
         static NODE_VERSION_REGEX: OnceCell<Regex> = OnceCell::new();
+        static NODE_VERSION_BINARY_REGEX: OnceCell<Regex> = OnceCell::new();
     }
 
     const NODE_VERSION_REGEX_STR: &'static str = r"node-v?(\d+)\.(\d+)\.(\d+)";
+    // For binary search, match "v18.20.8" format (without "node-" prefix)
+    const NODE_VERSION_BINARY_REGEX_STR: &'static str = r"v(\d+)\.(\d+)\.(\d+)";
 
     fn parse_node_version(cap: regex::Captures) -> Option<Version> {
         Some(Version::new(
@@ -126,18 +126,82 @@ impl MappedFile {
     }
 
     fn version(&self) -> Option<Version> {
-        if let Some(c) = self.path.to_str().and_then(|s| {
-            Self::NODE_VERSION_REGEX.with(|r| {
+        // First try to extract version from file path
+        if let Some(path_str) = self.path.to_str() {
+            if let Some(c) = Self::NODE_VERSION_REGEX.with(|r| {
                 r.get_or_init(|| Regex::new(Self::NODE_VERSION_REGEX_STR).unwrap())
-                    .captures(s)
-            })
-        }) {
-            match Self::parse_node_version(c) {
-                Some(v) => return Some(v),
-                None => {}
+                    .captures(path_str)
+            }) {
+                if let Some(v) = Self::parse_node_version(c) {
+                    return Some(v);
+                }
             }
         }
-        None
+
+        // If path doesn't contain version, try to read from binary data
+        match self.read_node_version_from_binary() {
+            Ok(Some(v)) => Some(v),
+            Ok(None) => {
+                // Could not find version in binary data
+                None
+            }
+            Err(e) => {
+                // Failed to load or search binary
+                warn!(
+                    "Failed to read Node.js version from binary {}: {:?}",
+                    self.path.display(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Read Node.js version from embedded strings in the binary.
+    /// Node.js embeds version string like "v18.20.8" in the executable.
+    /// This method assumes that self.contents has already been loaded by prior calls
+    /// (e.g., has_v8_symbols), so it doesn't need to load the file again.
+    fn read_node_version_from_binary(&self) -> Result<Option<Version>> {
+        // If contents not loaded yet, we cannot search. This shouldn't happen
+        // because has_v8_symbols() should have been called before version().
+        if self.contents.is_empty() {
+            // Try to read the file directly since we can't mutate self
+            let data = fs::read(&self.path)?;
+            return Self::search_version_in_data(&data);
+        }
+
+        Self::search_version_in_data(&self.contents)
+    }
+
+    /// Search for Node.js version string in binary data
+    fn search_version_in_data(data: &[u8]) -> Result<Option<Version>> {
+        // Search for version pattern "vX.Y.Z" in binary data
+        // Node.js embeds version string deep in the binary (can be at 40MB+)
+        // Search entire file, but limit to reasonable size to avoid excessive scanning
+        let search_limit = data.len().min(100 * 1024 * 1024); // Search up to 100MB
+
+        for i in 0..search_limit.saturating_sub(20) {
+            if data[i] == b'v' && i + 1 < search_limit && data[i + 1].is_ascii_digit() {
+                // Potential version string found, parse it
+                let end = (i + 20).min(search_limit);
+                if let Ok(version_str) = std::str::from_utf8(&data[i..end]) {
+                    // Use binary-specific regex that matches "vX.Y.Z" format
+                    if let Some(c) = Self::NODE_VERSION_BINARY_REGEX.with(|r| {
+                        r.get_or_init(|| Regex::new(Self::NODE_VERSION_BINARY_REGEX_STR).unwrap())
+                            .captures(version_str)
+                    }) {
+                        if let Some(v) = Self::parse_node_version(c) {
+                            // Sanity check: Node.js versions should be reasonable
+                            if v.major >= 12 && v.major <= 30 {
+                                return Ok(Some(v));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     fn find_symbol_address(&mut self, name: &str) -> Result<Option<u64>> {
@@ -283,17 +347,34 @@ impl Interpreter {
             }
         }
 
-        // Still try to get Node.js version for informational purposes
-        let node_version = exe.version().unwrap_or_else(|| Version::new(20, 0, 0));
+        // Try to get Node.js version for informational purposes
+        let node_version_opt = exe.version();
+        let has_node_version = node_version_opt.is_some();
+        let node_version = node_version_opt.unwrap_or_else(|| {
+            // If version detection fails, use a reasonable default for Node.js 18.x
+            // This allows version check to pass while we rely on V8 ELF symbols for accuracy
+            warn!(
+                "Process#{pid} Failed to detect Node.js version from path or binary, using default 20.0.0"
+            );
+            Version::new(20, 0, 0)
+        });
 
         // Try to read V8 version directly from ELF symbols (most accurate)
         let v8_version = match exe.read_v8_version_from_symbols() {
             Ok(Some(version)) => {
-                trace!(
-                    "Process#{pid} V8 version from ELF symbols: {} (Node: {})",
-                    version,
-                    node_version
-                );
+                if has_node_version {
+                    trace!(
+                        "Process#{pid} V8 version from ELF symbols: {} (Node: {})",
+                        version,
+                        node_version
+                    );
+                } else {
+                    trace!(
+                        "Process#{pid} V8 version from ELF symbols: {} (Node version unknown, using default {})",
+                        version,
+                        node_version
+                    );
+                }
                 version
             }
             Ok(None) => {
@@ -667,35 +748,35 @@ pub struct V8CodeKind {
     pub interpreted: u8, // CodeKindInterpretedFunction
 }
 
-// V8 9.x offsets (Node.js 16.x) - from v8_9.4.146.26_vmstructs_complete.json
+// V8 9.x offsets (Node.js 16.x)
 pub const V8_9_OFFSETS: &V8Offsets = &V8Offsets {
     frame_pointers: V8FramePointers {
-        marker: -8,         // v8dbg_off_fp_context
-        function: -16,      // v8dbg_off_fp_function (was incorrectly -8)
-        bytecode_offset: 0, // Not available in V8 9.x
+        marker: -8,           // v8dbg_off_fp_context = 0xf8 relative to FP
+        function: -16,        // v8dbg_off_fp_function = 0xf0 relative to FP
+        bytecode_offset: -40, // v8dbg_off_fp_bytecode_offset = 0xd8 relative to FP
     },
     js_function: V8JSFunction {
-        shared: 16,
-        code: 24,
+        shared: 24, // v8dbg_class_JSFunction__shared__SharedFunctionInfo
+        code: 48,   // v8dbg_class_JSFunction__raw_code__CodeT
     },
     shared_function_info: V8SharedFunctionInfo {
-        name_or_scope_info: 8,
-        function_data: 12,
-        script_or_debug_info: 16,
+        name_or_scope_info: 16, // v8dbg_class_SharedFunctionInfo__name_or_scope_info__Object
+        function_data: 8,       // v8dbg_class_SharedFunctionInfo__function_data__Object
+        script_or_debug_info: 32, // v8dbg_class_SharedFunctionInfo__script_or_debug_info__HeapObject
     },
     code: V8Code {
-        instruction_start: 96, // v8dbg_class_Code__instruction_start__uintptr_t (V8 9.x)
-        instruction_size: 40,  // v8dbg_class_Code__instruction_size__int (V8 9.x)
-        flags: 0,              // Not available in V8 9.x
-        deoptimization_data: 0, // Not available in V8 9.x
-        source_position_table: 24, // v8dbg_class_Code__source_position_table__ByteArray (V8 9.x)
+        instruction_start: 96, // v8dbg_class_Code__instruction_start__uintptr_t (V8 9.x) = 0x60
+        instruction_size: 40,  // v8dbg_class_Code__instruction_size__int (V8 9.x) = 0x28
+        flags: 48,             // Code::Flags = 0x30 (from OTel log)
+        deoptimization_data: 16, // Code::DeoptimizationData = 0x10 (from OTel log)
+        source_position_table: 24, // v8dbg_class_Code__source_position_table__ByteArray = 0x18
     },
     script: V8Script {
-        name: 12,
-        source: 16,
+        name: 16,  // v8dbg_class_Script__name__Object = 0x10
+        source: 8, // Script::Source = 0x8 (from OTel log, different from vmstructs!)
     },
     bytecode_array: V8BytecodeArray {
-        source_position_table: 8,
+        source_position_table: 32, // BytecodeArray::SourcePositionTable = 0x20
     },
     v8_type: V8Type {
         scope_info: 178,           // v8dbg_type_ScopeInfo__SCOPE_INFO_TYPE (V8 9.4)
@@ -718,10 +799,10 @@ pub const V8_9_OFFSETS: &V8Offsets = &V8Offsets {
         n_context_locals: 2,
     },
     deopt_data_index: V8DeoptimizationDataIndex {
-        inlined_function_count: 0,
-        literal_array: 1,
-        shared_function_info: 2,
-        inlining_positions: 4,
+        inlined_function_count: 1, // DeoptimizationDataIndex::InlinedFunctionCount = 0x1
+        literal_array: 2,          // DeoptimizationDataIndex::LiteralArray = 0x2
+        shared_function_info: 6,   // DeoptimizationDataIndex::SharedFunctionInfo = 0x6
+        inlining_positions: 7,     // DeoptimizationDataIndex::InliningPositions = 0x7
     },
     heap_object: V8HeapObject { map: 0 },
     map: V8Map { instance_type: 12 },
@@ -759,14 +840,14 @@ pub const V8_9_OFFSETS: &V8Offsets = &V8Offsets {
         optimized_frame: 13,        // V8 9-10, replaced by turbofan_frame in V8 11+
     },
     codekind: V8CodeKind {
-        mask: 15, // Default for V8 9 (may not have CodeKind)
-        shift: 0,
-        baseline: 0,    // Not available in V8 9
-        interpreted: 0, // Not available in V8 9
+        mask: 15,        // CodeKind::FieldMask = 0xf
+        shift: 0,        // CodeKind::FieldShift = 0x0
+        baseline: 11,    // CodeKind::Baseline = 0xb
+        interpreted: 10, // CodeKindInterpretedFunction (inferred from V8 10)
     },
 };
 
-// V8 10.x offsets (Node.js 18.x) - from v8_10.2.154.26_vmstructs_complete.json
+// V8 10.x offsets (Node.js 18.x)
 pub const V8_10_OFFSETS: &V8Offsets = &V8Offsets {
     frame_pointers: V8FramePointers {
         marker: -8,           // v8dbg_off_fp_context
@@ -774,33 +855,33 @@ pub const V8_10_OFFSETS: &V8Offsets = &V8Offsets {
         bytecode_offset: -40, // v8dbg_off_fp_bytecode_offset (was incorrectly -24)
     },
     js_function: V8JSFunction {
-        shared: 16,
-        code: 24,
+        shared: 24, // v8dbg_class_JSFunction__shared__SharedFunctionInfo (V8 10.2)
+        code: 48,   // v8dbg_class_JSFunction__code__CodeT (V8 10.2)
     },
     shared_function_info: V8SharedFunctionInfo {
-        name_or_scope_info: 8,
-        function_data: 12,
-        script_or_debug_info: 16,
+        name_or_scope_info: 16, // v8dbg_class_SharedFunctionInfo__name_or_scope_info__Object (V8 10.2)
+        function_data: 8,       // v8dbg_class_SharedFunctionInfo__function_data__Object (V8 10.2)
+        script_or_debug_info: 32, // v8dbg_class_SharedFunctionInfo__script_or_debug_info__HeapObject (V8 10.2)
     },
     code: V8Code {
-        instruction_start: 128, // v8dbg_class_Code__instruction_start__uintptr_t (V8 10.x)
-        instruction_size: 40,   // v8dbg_class_Code__instruction_size__int (V8 10.x)
-        flags: 48,              // v8dbg_class_Code__flags__uint32_t (V8 10.x)
-        deoptimization_data: 0, // Not available in V8 10.x
-        source_position_table: 0, // Not available in V8 10.x
+        instruction_start: 128, // v8dbg_class_Code__instruction_start__uintptr_t (V8 10.x) = 0x80
+        instruction_size: 40,   // v8dbg_class_Code__instruction_size__int (V8 10.x) = 0x28
+        flags: 48,              // v8dbg_class_Code__flags__uint32_t (V8 10.x) = 0x30
+        deoptimization_data: 16, // Code::DeoptimizationData (V8 10.x) = 0x10
+        source_position_table: 24, // Code::SourcePositionTable (V8 10.x) = 0x18
     },
     script: V8Script {
-        name: 12,
-        source: 16,
+        name: 16,  // v8dbg_class_Script__name__Object (V8 10.2)
+        source: 8, // v8dbg_class_Script__source__Object (V8 10.2)
     },
     bytecode_array: V8BytecodeArray {
-        source_position_table: 8,
+        source_position_table: 32, // BytecodeArray::SourcePositionTable (V8 10.x) = 0x20
     },
     v8_type: V8Type {
         scope_info: 256,           // v8dbg_type_ScopeInfo__SCOPE_INFO_TYPE (V8 10.2)
         shared_function_info: 257, // v8dbg_type_SharedFunctionInfo__SHARED_FUNCTION_INFO_TYPE
-        js_function_first: 2065,   // v8dbg_type_JSFunction__JS_FUNCTION_TYPE
-        js_function_last: 2065,
+        js_function_first: 2065,   // FirstJSFunctionType (V8 10.x) = 0x811
+        js_function_last: 2079,    // LastJSFunctionType (V8 10.x) = 0x81f
         string_first: 0,
         script: 170, // v8dbg_type_Script__SCRIPT_TYPE
         code: 240,   // v8dbg_type_Code__CODE_TYPE (V8 10.2)
@@ -817,10 +898,10 @@ pub const V8_10_OFFSETS: &V8Offsets = &V8Offsets {
         n_context_locals: 2,
     },
     deopt_data_index: V8DeoptimizationDataIndex {
-        inlined_function_count: 0,
-        literal_array: 1,
-        shared_function_info: 2,
-        inlining_positions: 4,
+        inlined_function_count: 1, // DeoptimizationDataInlinedFunctionCountIndex (V8 10.x) = 0x1
+        literal_array: 2,          // DeoptimizationDataLiteralArrayIndex (V8 10.x) = 0x2
+        shared_function_info: 6,   // DeoptimizationDataSharedFunctionInfoIndex (V8 10.x) = 0x6
+        inlining_positions: 7,     // DeoptimizationDataInliningPositionsIndex (V8 10.x) = 0x7
     },
     heap_object: V8HeapObject { map: 0 },
     map: V8Map { instance_type: 12 },
@@ -865,7 +946,7 @@ pub const V8_10_OFFSETS: &V8Offsets = &V8Offsets {
     },
 };
 
-// V8 11.x offsets (Node.js 20.x) - from v8_11.3.244.8_vmstructs_complete.json
+// V8 11.x offsets (Node.js 20.x)
 pub const V8_11_OFFSETS: &V8Offsets = &V8Offsets {
     frame_pointers: V8FramePointers {
         marker: -8,           // v8dbg_off_fp_context
@@ -969,7 +1050,6 @@ pub const V8_11_OFFSETS: &V8Offsets = &V8Offsets {
 };
 
 // V8 12.x offsets (Node.js 22.x, 23.x)
-// Based on v8_12.4.254.21_vmstructs_complete.json from opentelemetry-ebpf-profiler
 pub const V8_12_OFFSETS: &V8Offsets = &V8Offsets {
     frame_pointers: V8FramePointers {
         marker: -8,           // v8dbg_off_fp_context
@@ -1110,6 +1190,10 @@ impl V8UnwindTable {
             registry.insert(pid, info.v8_version.clone());
         }
 
+        // Register as V8 interpreter in the global type registry
+        // This enables strict O(1) lookup in is_v8_process()
+        crate::register_interpreter(pid, crate::InterpreterType::V8);
+
         let _offsets_id = self.get_or_load_offsets(&info.v8_version);
 
         // Create symbolizer for this process
@@ -1207,6 +1291,9 @@ impl V8UnwindTable {
         if let Ok(mut registry) = get_version_registry().lock() {
             registry.remove(&pid);
         }
+
+        // Unregister from global interpreter type registry
+        crate::unregister_interpreter(pid);
     }
 
     /// Get V8 version for a specific process
@@ -1395,11 +1482,34 @@ pub fn get_offsets_for_v8_version(version: &Version) -> &'static V8Offsets {
     }
 }
 
-fn detect_v8_process(pid: u32) -> bool {
+/// C FFI function to detect if a process is running Node.js/V8
+///
+/// TWO-PHASE DETECTION:
+/// 1. Fast path: Check if already registered (O(1), ~50ns)
+///    - If registered, we know it's V8 (validated via ELF parsing during load)
+/// 2. Fallback: Lightweight filename check (~10μs)
+///    - For new/unregistered processes
+///    - After this returns true, v8_unwind_table_load() will:
+///      a) Do full ELF validation (V8 version symbols, version check)
+///      b) Register to global registry if validation passes
+///    - Future calls use fast path
+///
+/// This ensures:
+/// - Strict validation: Only ELF-validated processes stay registered
+/// - No chicken-egg problem: Initial detection works via filename
+/// - High performance: O(1) lookup for hot paths
+#[no_mangle]
+pub unsafe extern "C" fn is_v8_process(pid: u32) -> bool {
+    // Fast path: O(1) registry lookup for already-loaded processes
+    if crate::is_registered_as(pid, crate::InterpreterType::V8) {
+        return true;
+    }
+
+    // Fallback: Lightweight filename check for new processes
+    // This allows v8_unwind_table_load() to be called, which does strict ELF validation
     if let Ok(exe_path) = std::fs::read_link(format!("/proc/{}/exe", pid)) {
         if let Some(filename) = exe_path.file_name() {
             if let Some(name) = filename.to_str() {
-                // Check for Node.js binary names
                 return name == "node"
                     || name.starts_with("node")
                     || name == "nodejs"
@@ -1417,12 +1527,6 @@ fn detect_v8_process(pid: u32) -> bool {
     }
 
     false
-}
-
-/// C FFI function to detect if a process is running Node.js/V8
-#[no_mangle]
-pub unsafe extern "C" fn is_v8_process(pid: u32) -> bool {
-    detect_v8_process(pid)
 }
 
 /// C FFI function to merge V8 interpreter and native stacks

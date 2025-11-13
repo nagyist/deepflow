@@ -25,8 +25,6 @@
 //! 2. V8ObjectReader: Parse V8 tagged pointers and heap objects
 //! 3. V8Symbolizer: Main symbolization logic coordinating object reads
 //! 4. V8FrameInfo: Structured frame information for output
-//!
-//! Reference: OpenTelemetry eBPF Profiler's V8 implementation
 
 use std::collections::HashMap;
 
@@ -224,8 +222,6 @@ impl SourcePositionTable {
 
     /// Decode a signed variable-length integer (zigzag encoded, 64-bit).
     /// Returns (value, bytes_consumed).
-    ///
-    /// OpenTelemetry uses int64 for source position accumulation, so we return i64.
     fn decode_signed_varint(data: &[u8]) -> Result<(i64, usize)> {
         let mut result = 0u64;
         let mut shift = 0;
@@ -409,7 +405,7 @@ impl<'a> V8ObjectReader<'a> {
             if (slot_value & 0x1) == 0x1 {
                 let obj_addr = slot_value & !0x1;
 
-                // Try to read as string - just like OpenTelemetry's getString
+                // Try to read as string
                 // This will fail for non-string types (Symbol, ScopeInfo, etc.)
                 match self.read_string(obj_addr) {
                     Ok(func_name) => {
@@ -1141,7 +1137,6 @@ impl V8Symbolizer {
         // This is the actual function that contains all the inlined functions
 
         // Read the outermost SFI from DeoptimizationData[SharedFunctionInfo] index
-        // Reference: OpenTelemetry's symbolizeCode() which gets SFI from Code object
         let outermost_sfi_idx = self.offsets.deopt_data_index.shared_function_info as usize;
 
         if outermost_sfi_idx < deopt_data.deopt_array.len() {
@@ -1224,8 +1219,6 @@ fn escape_js_reserved_name(name: String) -> String {
 
 /// C FFI function to resolve a V8 frame using OpenTelemetry encoding format
 /// Returns a C-allocated string that must be freed by the caller using clib_mem_free()
-///
-/// OpenTelemetry-style V8 frame symbolization.
 ///
 /// Parameters:
 /// - pointer_and_type: Lower 3 bits = frame type, rest = pointer value
@@ -1636,11 +1629,9 @@ fn read_object_type(mem: &RemoteMemory, obj_addr: u64, offsets: &V8Offsets) -> R
 /// Analyze V8 ScopeInfo object to extract function name.
 ///
 /// ScopeInfo has a complex layout that varies between V8 versions.
-/// We use a heuristic approach similar to OpenTelemetry:
+/// We use a heuristic approach:
 /// - Skip reserved slots and context locals
 /// - Scan remaining slots for first valid string (assumed to be function name)
-///
-/// Reference: OpenTelemetry's analyzeScopeInfo() in v8.go:909-963
 fn analyze_scope_info(
     mem: &RemoteMemory,
     scope_info_addr: u64,

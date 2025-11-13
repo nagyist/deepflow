@@ -116,10 +116,6 @@ typedef struct {
 
 #define MAX_SYMBOL_NUM 1024
 
-// ===========================================================================
-// V8 Profiling Support - OpenTelemetry-Compatible Architecture
-// ===========================================================================
-
 // V8 tagged pointer constants
 #define V8_HEAP_OBJECT_TAG        0x1
 #define V8_HEAP_OBJECT_TAG_MASK   0x3
@@ -160,11 +156,7 @@ typedef struct {
 #define ERR_V8_BAD_JS_FUNC    4
 #define ERR_V8_UNWIND_STOP    5
 
-// ===========================================================================
-// V8 Process Information (Stored in BPF Map per Process)
-// ===========================================================================
 // This structure contains V8 version-specific offsets and type IDs
-// Similar to OpenTelemetry's V8ProcInfo but adapted for DeepFlow
 typedef struct {
 	// Heap Object Offsets
 	__u16 off_HeapObject_map;              // Map field offset in HeapObject

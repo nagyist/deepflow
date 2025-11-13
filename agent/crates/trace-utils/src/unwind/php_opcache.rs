@@ -16,8 +16,7 @@
 
 //! PHP OPcache JIT Detection and Memory Mapping
 //!
-//! This module handles PHP OPcache extension detection and JIT memory region mapping,
-//! following the approach from OpenTelemetry's opcache.go implementation.
+//! This module handles PHP OPcache extension detection and JIT memory region mapping
 
 use log::{debug, trace, warn};
 use object::{Object, ObjectSection, ObjectSymbol};

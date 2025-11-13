@@ -16,8 +16,7 @@
 
 //! PHP JIT Support Module
 //!
-//! This module implements PHP 8+ JIT compilation support for profiling,
-//! based on the OpenTelemetry eBPF profiler approach.
+//! This module implements PHP 8+ JIT compilation support for profiling
 
 use log::{debug, trace, warn};
 use object::{Object, ObjectSection, ObjectSymbol};
@@ -235,7 +234,7 @@ impl PhpJitSupport {
 
     /// Extract JIT return address from x86_64 execute_ex
     ///
-    /// This follows the OpenTelemetry approach: find the first JMP instruction
+    /// Find the first JMP instruction
     /// in execute_ex and return the address right after it (the return address).
     /// Since all JIT code is ultimately called from execute_ex, this is the
     /// return address for all JIT code.
@@ -312,7 +311,7 @@ impl PhpJitSupport {
 
     /// Extract JIT return address from aarch64 execute_ex
     ///
-    /// This follows the OpenTelemetry approach: find the first BR (branch register)
+    /// Find the first BR (branch register)
     /// instruction in execute_ex. This is an unconditional jump through a register,
     /// which is how PHP JIT code is called using GCC's "labels as values" feature.
     ///

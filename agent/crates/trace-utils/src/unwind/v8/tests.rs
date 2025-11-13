@@ -211,7 +211,7 @@ fn test_v8_process_detection() {
     let current_pid = std::process::id();
 
     // Test process detection with current process (likely not Node.js)
-    let is_v8 = detect_v8_process(current_pid);
+    let is_v8 = unsafe { is_v8_process(current_pid) };
 
     // For most test environments, current process won't be Node.js
     // But we mainly test that the function doesn't crash
@@ -219,10 +219,6 @@ fn test_v8_process_detection() {
         "Current process (PID {}) detected as V8/Node.js: {}",
         current_pid, is_v8
     );
-
-    // Test V8 process detection via C FFI
-    let is_v8_c = unsafe { is_v8_process(current_pid) };
-    assert_eq!(is_v8, is_v8_c, "Rust and C FFI results should match");
 }
 
 #[test]
@@ -263,14 +259,8 @@ fn test_v8_smi_parsing() {
 #[test]
 fn test_error_handling() {
     // Test invalid PID
-    let invalid_result = detect_v8_process(0);
+    let invalid_result = unsafe { is_v8_process(0) };
     assert_eq!(invalid_result, false, "Invalid PID should return false");
-
-    let invalid_c_result = unsafe { is_v8_process(0) };
-    assert_eq!(
-        invalid_c_result, false,
-        "Invalid PID should return false in C FFI"
-    );
 
     // Test stack merging with null pointers
     let mut buffer = vec![0u8; 256];
@@ -654,19 +644,19 @@ fn test_v8_deoptimization_data_indices() {
     // Test DeoptimizationData array indices for different V8 versions
     use crate::unwind::v8::{V8_10_OFFSETS, V8_11_OFFSETS, V8_12_OFFSETS, V8_9_OFFSETS};
 
-    // V8 9.x
-    assert_eq!(V8_9_OFFSETS.deopt_data_index.inlined_function_count, 0);
-    assert_eq!(V8_9_OFFSETS.deopt_data_index.literal_array, 1);
-    assert_eq!(V8_9_OFFSETS.deopt_data_index.shared_function_info, 2);
-    assert_eq!(V8_9_OFFSETS.deopt_data_index.inlining_positions, 4);
+    // V8 9.x (Node.js 16.x) - same as V8 10.x based on actual vmstructs
+    assert_eq!(V8_9_OFFSETS.deopt_data_index.inlined_function_count, 1);
+    assert_eq!(V8_9_OFFSETS.deopt_data_index.literal_array, 2);
+    assert_eq!(V8_9_OFFSETS.deopt_data_index.shared_function_info, 6);
+    assert_eq!(V8_9_OFFSETS.deopt_data_index.inlining_positions, 7);
 
-    // V8 10.x (same as V8 9.x)
-    assert_eq!(V8_10_OFFSETS.deopt_data_index.inlined_function_count, 0);
-    assert_eq!(V8_10_OFFSETS.deopt_data_index.literal_array, 1);
-    assert_eq!(V8_10_OFFSETS.deopt_data_index.shared_function_info, 2);
-    assert_eq!(V8_10_OFFSETS.deopt_data_index.inlining_positions, 4);
+    // V8 10.x (changed from V8 9.x based on Node.js 18.20.8 / V8 10.2.154)
+    assert_eq!(V8_10_OFFSETS.deopt_data_index.inlined_function_count, 1);
+    assert_eq!(V8_10_OFFSETS.deopt_data_index.literal_array, 2);
+    assert_eq!(V8_10_OFFSETS.deopt_data_index.shared_function_info, 6);
+    assert_eq!(V8_10_OFFSETS.deopt_data_index.inlining_positions, 7);
 
-    // V8 11.x (changed indices)
+    // V8 11.x (same as V8 10.x)
     assert_eq!(V8_11_OFFSETS.deopt_data_index.inlined_function_count, 1);
     assert_eq!(V8_11_OFFSETS.deopt_data_index.literal_array, 2);
     assert_eq!(V8_11_OFFSETS.deopt_data_index.shared_function_info, 6);
@@ -733,10 +723,11 @@ fn test_v8_code_object_offsets_evolution() {
     assert_eq!(V8_11_OFFSETS.code.instruction_size, 56);
     assert_eq!(V8_12_OFFSETS.code.instruction_size, 52);
 
-    // deoptimization_data was added in V8 11+
-    assert_eq!(V8_9_OFFSETS.code.deoptimization_data, 0);
-    assert_eq!(V8_11_OFFSETS.code.deoptimization_data, 16);
-    assert_eq!(V8_12_OFFSETS.code.deoptimization_data, 8);
+    // deoptimization_data offsets
+    assert_eq!(V8_9_OFFSETS.code.deoptimization_data, 16); // V8 9.x has it at 0x10
+    assert_eq!(V8_10_OFFSETS.code.deoptimization_data, 16); // V8 10.x same as 9.x
+    assert_eq!(V8_11_OFFSETS.code.deoptimization_data, 16); // V8 11.x unchanged
+    assert_eq!(V8_12_OFFSETS.code.deoptimization_data, 8); // V8 12.x moved to 0x8
 }
 
 #[test]
@@ -744,15 +735,15 @@ fn test_v8_jsfunction_offsets_evolution() {
     // Test how JSFunction offsets evolved across V8 versions
     use crate::unwind::v8::{V8_10_OFFSETS, V8_11_OFFSETS, V8_12_OFFSETS, V8_9_OFFSETS};
 
-    // V8 9.x
-    assert_eq!(V8_9_OFFSETS.js_function.shared, 16);
-    assert_eq!(V8_9_OFFSETS.js_function.code, 24);
+    // V8 9.x (Node.js 16.x) - same as V8 10.x based on actual vmstructs
+    assert_eq!(V8_9_OFFSETS.js_function.shared, 24);
+    assert_eq!(V8_9_OFFSETS.js_function.code, 48);
 
-    // V8 10.x (same as V8 9.x)
-    assert_eq!(V8_10_OFFSETS.js_function.shared, 16);
-    assert_eq!(V8_10_OFFSETS.js_function.code, 24);
+    // V8 10.x (changed from V8 9.x based on Node.js 18.20.8 / V8 10.2.154)
+    assert_eq!(V8_10_OFFSETS.js_function.shared, 24);
+    assert_eq!(V8_10_OFFSETS.js_function.code, 48);
 
-    // V8 11.x (changed)
+    // V8 11.x (same as V8 10.x)
     assert_eq!(V8_11_OFFSETS.js_function.shared, 24);
     assert_eq!(V8_11_OFFSETS.js_function.code, 48);
 

@@ -456,7 +456,6 @@ static char *resolve_custom_symbol_addr(symbol_t *symbols, u32 *symbol_ids, int 
 	memset(format_str, 0, sizeof(format_str));
 
 	u32 symbol_id = address & 0xFFFFFFFF;
-
 	for (int i = 0; i < n_symbols; i++) {
 		if (symbol_ids[i] == symbol_id) {
 			if (strlen(symbols[i].class_name) > 0) {
@@ -492,8 +491,14 @@ static int get_stack_ips(struct bpf_tracer *t,
 {
 	ASSERT(stack_id >= 0);
 
+	// Determine if this is a custom stack map (with frame_types and extra_data)
+	// or a regular stack map (only addresses)
+	bool is_custom_map = (strstr(stack_map_name, "custom") != NULL);
+
 	// Try to read full stack_t structure first (for interpreter stacks with V8/Python/PHP)
-	if (full_stack && bpf_table_get_value(t, stack_map_name, stack_id, (void *)full_stack)) {
+	// Only attempt this if the map name indicates it's a custom map
+	if (full_stack && is_custom_map &&
+	    bpf_table_get_value(t, stack_map_name, stack_id, (void *)full_stack)) {
 		// Successfully read full stack_t structure, copy addrs to ips for compatibility
 		memcpy(ips, full_stack->addrs, sizeof(full_stack->addrs));
 
@@ -506,16 +511,18 @@ static int get_stack_ips(struct bpf_tracer *t,
 	}
 
 	// Fallback: read only addresses (for regular stack traces)
+	// CRITICAL FIX: Clear full_stack BEFORE reading data to avoid zeroing out the data
+	// we just read. When called with ips=stack.addrs and full_stack=&stack, the memset
+	// after bpf_table_get_value would zero out the stack addresses we just read.
+	if (full_stack) {
+		memset(full_stack, 0, sizeof(*full_stack));
+	}
+
 	if (!bpf_table_get_value(t, stack_map_name, stack_id, (void *)ips)) {
 		return ETR_NOTEXIST;
 	}
 
-	// Clear full_stack if provided but couldn't read it
-	if (full_stack) {
-		memset(full_stack, 0, sizeof(*full_stack));
-		// Copy ips to full_stack->addrs for consistency
-		memcpy(full_stack->addrs, ips, PERF_MAX_STACK_DEPTH * sizeof(u64));
-	}
+	// Note: No need to memcpy ips to full_stack->addrs because they point to the same memory
 
 	return ETR_OK;
 }
@@ -595,7 +602,6 @@ static char *build_stack_trace_string(struct bpf_tracer *t,
 		return NULL;
 
 	int start_idx = -1, folded_size = 0;
-
 	for (i = PERF_MAX_STACK_DEPTH - 1; i >= 0; i--) {
 		if (ips[i] == 0 || ips[i] == sentinel_addr)
 			continue;
@@ -610,10 +616,8 @@ static char *build_stack_trace_string(struct bpf_tracer *t,
 			u64 pointer_and_type = ips[i];
 			u64 delta_or_marker = stack.extra_data_a[i];
 			u64 sfi_fallback = stack.extra_data_b[i];
-
-			// Call Rust V8 symbolizer with OpenTelemetry-style parameters plus SFI fallback
+			// Call Rust V8 symbolizer with SFI fallback
 			str = resolve_v8_frame((u32)pid, pointer_and_type, delta_or_marker, sfi_fallback);
-
 			// If symbolization failed, use placeholder
 			if (str == NULL || strlen(str) == 0) {
 				if (str != NULL) {
@@ -630,6 +634,7 @@ static char *build_stack_trace_string(struct bpf_tracer *t,
 					strcpy(str, v8_symbol);
 				}
 			}
+		// Check if this is a PHP frame
 		} else if (stack.frame_types[i] == FRAME_TYPE_PHP) {
 			// Extract PHP frame information
 			// ips[i] = zend_function pointer
@@ -638,10 +643,8 @@ static char *build_stack_trace_string(struct bpf_tracer *t,
 			u64 zend_function_ptr = ips[i];
 			u64 lineno_and_type = stack.extra_data_a[i];
 			u64 is_jit = stack.extra_data_b[i];
-
 			// Call Rust PHP symbolizer (handles JIT suffix and top-level code internally)
 			char *rust_str = resolve_php_frame((u32)pid, zend_function_ptr, lineno_and_type, is_jit);
-
 			// Copy Rust string to C-managed memory
 			// This is necessary because symbol_array strings are freed with clib_mem_free
 			// but Rust strings must be freed with libc free()
@@ -665,6 +668,7 @@ static char *build_stack_trace_string(struct bpf_tracer *t,
 					strcpy(str, php_symbol);
 				}
 			}
+		// Normal frame
 		} else if (use_symbol_table) {
 			str = resolve_custom_symbol_addr(symbols, symbol_ids, n_symbols, (i == start_idx), ips[i]);
 		} else {

@@ -22,10 +22,10 @@ use semver::Version;
 fn test_is_v8_process() {
     // Test with current process (not a Node.js process)
     let current_pid = std::process::id();
-    assert!(!detect_v8_process(current_pid));
+    assert!(!unsafe { is_v8_process(current_pid) });
 
     // Test with invalid PID
-    assert!(!detect_v8_process(999999));
+    assert!(!unsafe { is_v8_process(999999) });
 }
 
 #[test]
