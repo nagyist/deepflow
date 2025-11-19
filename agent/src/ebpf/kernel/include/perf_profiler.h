@@ -131,6 +131,15 @@ typedef struct {
 #define V8_FP_CONTEXT_SIZE        64     // Frame pointer context size
 #define V8_MAX_FRAME_SIZE         0x2000 // 8KB max frame size
 
+// V8 Entry Frame architecture-specific constants
+// On ARM64, JS Entry Frame stores additional callee-saved registers before the FP/LR pair
+// See: https://chromium.googlesource.com/v8/v8/+/main/src/execution/arm64/frame-constants-arm64.h
+#if defined(__aarch64__)
+  #define V8_ENTRYFRAME_CALLEE_SAVED_REGS_BEFORE_FP_LR_PAIR 18
+#else
+  #define V8_ENTRYFRAME_CALLEE_SAVED_REGS_BEFORE_FP_LR_PAIR 0
+#endif
+
 // V8 frame type encoding (lower 3 bits, OpenTelemetry-compatible)
 // The frame type is stored in the lower 3 bits of pointer_and_type.
 // V8 heap objects are aligned to 8 bytes, so bits 0-2 are always zero

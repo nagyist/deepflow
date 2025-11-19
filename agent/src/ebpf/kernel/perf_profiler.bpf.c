@@ -134,7 +134,6 @@ MAP_HASH(php_unwind_info_map, __u32, php_unwind_info_t, 65536, FEATURE_FLAG_PROF
 MAP_HASH(php_offsets_map, __u8, php_offsets_t, 4, FEATURE_FLAG_PROFILE)
 
 MAP_HASH(v8_unwind_info_map, __u32, v8_proc_info_t, 65536, FEATURE_FLAG_PROFILE)
-MAP_HASH(v8_offsets_map, __u8, v8_offsets_t, 4, FEATURE_FLAG_PROFILE)
 
 struct bpf_map_def SEC("maps") __symbol_table = {
     .type = BPF_MAP_TYPE_LRU_HASH,
@@ -1731,6 +1730,16 @@ unwind_frame:
 	state->regs.bp = new_fp;
 	state->regs.ip = ret_addr;
 	state->regs.sp = fp + 16;
+
+	// ARM64-specific: JS Entry Frame stores additional callee-saved registers
+	// before the FP/LR pair. When unwinding from Entry Frame (marker 0 or 1),
+	// we need to adjust SP to skip these registers.
+	// See: https://chromium.googlesource.com/v8/v8/+/main/src/execution/arm64/frame-constants-arm64.h
+	if (pointer_and_type == V8_MAKE_PTR(V8_TYPE_MARKER, fp) && delta_or_marker == 1) {
+		state->regs.sp += V8_ENTRYFRAME_CALLEE_SAVED_REGS_BEFORE_FP_LR_PAIR * sizeof(__u64);
+		// bpf_debug("[V8 eBPF] ARM64 Entry Frame: adjusted SP by %d bytes",
+		//           V8_ENTRYFRAME_CALLEE_SAVED_REGS_BEFORE_FP_LR_PAIR * sizeof(__u64));
+	}
 
 	// bpf_debug("[V8 eBPF] Unwound to fp=0x%lx ret=0x%lx", new_fp, ret_addr);
 	__sync_fetch_and_add(&vi->unwinding_success, 1);

@@ -74,7 +74,6 @@
 #define MAP_PHP_UNWIND_INFO_NAME        "__php_unwind_info_map"
 #define MAP_PHP_OFFSETS_NAME            "__php_offsets_map"
 #define MAP_V8_UNWIND_INFO_NAME         "__v8_unwind_info_map"
-#define MAP_V8_OFFSETS_NAME             "__v8_offsets_map"
 #define MAP_SYMBOL_TABLE_NAME           "__symbol_table"
 #define PROFILE_PG_CNT_DEF              16	// perf ring-buffer page count
 

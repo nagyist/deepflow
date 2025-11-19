@@ -45,7 +45,6 @@ fn test_node_to_v8_version_mapping() {
         (Version::new(18, 18, 0), Version::new(10, 2, 154)),
         (Version::new(20, 11, 0), Version::new(11, 3, 244)),
         (Version::new(22, 0, 0), Version::new(12, 4, 254)),
-
         // Odd Node.js versions (minor 5-9 in V8)
         (Version::new(17, 9, 0), Version::new(9, 6, 180)),
         (Version::new(19, 0, 0), Version::new(10, 8, 168)),
@@ -121,7 +120,7 @@ fn test_v8_offsets_generation() {
 #[test]
 fn test_v8_unwind_table_operations() {
     // Test V8 unwind table basic operations
-    let mut table = unsafe { V8UnwindTable::new(-1, -1) }; // Mock file descriptors
+    let mut table = unsafe { V8UnwindTable::new(-1) }; // Mock file descriptor
     let test_pid = 12345;
 
     // Test load operation (should not crash even with invalid FDs)
@@ -299,17 +298,17 @@ fn test_version_compatibility() {
     let supported_node_versions = vec![
         Version::new(16, 0, 0),
         Version::new(16, 20, 2),
-        Version::new(17, 0, 0),  // Odd version support
+        Version::new(17, 0, 0), // Odd version support
         Version::new(17, 9, 0),
         Version::new(18, 0, 0),
         Version::new(18, 18, 2),
-        Version::new(19, 0, 0),  // Odd version support
+        Version::new(19, 0, 0), // Odd version support
         Version::new(20, 0, 0),
         Version::new(20, 11, 0),
         Version::new(21, 0, 0),
-        Version::new(21, 6, 0),  // Odd version support
+        Version::new(21, 6, 0), // Odd version support
         Version::new(22, 0, 0),
-        Version::new(23, 0, 0),  // Odd version support
+        Version::new(23, 0, 0), // Odd version support
     ];
 
     let unsupported_node_versions = vec![
@@ -318,7 +317,7 @@ fn test_version_compatibility() {
         Version::new(24, 0, 0),  // Too new (hypothetical)
     ];
 
-    let req = semver::VersionReq::parse(">=16.0.0, <=23.0.0").unwrap();
+    let req = semver::VersionReq::parse(">=16.0.0, <24.0.0").unwrap();
 
     for version in supported_node_versions {
         assert!(
@@ -342,7 +341,7 @@ fn test_concurrent_operations() {
     use std::sync::Arc;
     use std::thread;
 
-    let table = Arc::new(std::sync::Mutex::new(unsafe { V8UnwindTable::new(-1, -1) }));
+    let table = Arc::new(std::sync::Mutex::new(unsafe { V8UnwindTable::new(-1) }));
     let mut handles = vec![];
 
     // Test concurrent operations
@@ -373,7 +372,7 @@ fn test_memory_management() {
     const NUM_ITERATIONS: usize = 100;
 
     for _ in 0..NUM_ITERATIONS {
-        let mut table = unsafe { V8UnwindTable::new(-1, -1) };
+        let mut table = unsafe { V8UnwindTable::new(-1) };
 
         // Load and unload multiple processes
         for pid in 10000..10010 {
@@ -400,7 +399,7 @@ fn test_performance_benchmark() {
     const NUM_OPERATIONS: usize = 1000;
     let start = std::time::Instant::now();
 
-    let mut table = unsafe { V8UnwindTable::new(-1, -1) };
+    let mut table = unsafe { V8UnwindTable::new(-1) };
 
     for i in 0..NUM_OPERATIONS {
         let pid = 20000 + (i % 100); // Cycle through 100 PIDs
@@ -508,45 +507,69 @@ fn test_v8_version_encoding_3digit_patch() {
 #[test]
 fn test_v8_offset_selection_by_minor_version() {
     // Test that offset selection uses (major, minor) matching
-    use crate::unwind::v8::{V8_9_6_OFFSETS, V8_10_8_OFFSETS, V8_11_8_OFFSETS, V8_12_9_OFFSETS};
-    use crate::unwind::v8::{V8_9_OFFSETS, V8_10_OFFSETS, V8_11_OFFSETS, V8_12_OFFSETS};
+    use crate::unwind::v8::{V8_10_8_OFFSETS, V8_11_8_OFFSETS, V8_12_9_OFFSETS, V8_9_6_OFFSETS};
+    use crate::unwind::v8::{V8_10_OFFSETS, V8_11_OFFSETS, V8_12_OFFSETS, V8_9_OFFSETS};
 
     // Test V8 9.x: minor 0-5 → even, 6-9 → odd
     let v9_4 = get_offsets_for_v8_version(&Version::new(9, 4, 0));
     let v9_6 = get_offsets_for_v8_version(&Version::new(9, 6, 0));
     // Compare actual field values instead of pointers
-    assert_eq!(v9_4.v8_type.code, V8_9_OFFSETS.v8_type.code, "V8 9.4 should use even offsets");
-    assert_eq!(v9_6.v8_type.code, V8_9_6_OFFSETS.v8_type.code, "V8 9.6 should use odd offsets");
+    assert_eq!(
+        v9_4.v8_type.code, V8_9_OFFSETS.v8_type.code,
+        "V8 9.4 should use even offsets"
+    );
+    assert_eq!(
+        v9_6.v8_type.code, V8_9_6_OFFSETS.v8_type.code,
+        "V8 9.6 should use odd offsets"
+    );
 
     // Test V8 10.x
     let v10_2 = get_offsets_for_v8_version(&Version::new(10, 2, 0));
     let v10_8 = get_offsets_for_v8_version(&Version::new(10, 8, 0));
-    assert_eq!(v10_2.v8_type.code, V8_10_OFFSETS.v8_type.code, "V8 10.2 should use even offsets");
-    assert_eq!(v10_8.v8_type.code, V8_10_8_OFFSETS.v8_type.code, "V8 10.8 should use odd offsets");
+    assert_eq!(
+        v10_2.v8_type.code, V8_10_OFFSETS.v8_type.code,
+        "V8 10.2 should use even offsets"
+    );
+    assert_eq!(
+        v10_8.v8_type.code, V8_10_8_OFFSETS.v8_type.code,
+        "V8 10.8 should use odd offsets"
+    );
 
     // Test V8 11.x
     let v11_3 = get_offsets_for_v8_version(&Version::new(11, 3, 0));
     let v11_8 = get_offsets_for_v8_version(&Version::new(11, 8, 0));
-    assert_eq!(v11_3.js_function.shared, V8_11_OFFSETS.js_function.shared, "V8 11.3 should use even offsets");
-    assert_eq!(v11_8.js_function.shared, V8_11_8_OFFSETS.js_function.shared, "V8 11.8 should use odd offsets");
+    assert_eq!(
+        v11_3.js_function.shared, V8_11_OFFSETS.js_function.shared,
+        "V8 11.3 should use even offsets"
+    );
+    assert_eq!(
+        v11_8.js_function.shared, V8_11_8_OFFSETS.js_function.shared,
+        "V8 11.8 should use odd offsets"
+    );
 
     // Test V8 12.x
     let v12_4 = get_offsets_for_v8_version(&Version::new(12, 4, 0));
     let v12_9 = get_offsets_for_v8_version(&Version::new(12, 9, 0));
-    assert_eq!(v12_4.scope_info_index.first_vars, V8_12_OFFSETS.scope_info_index.first_vars, "V8 12.4 should use even offsets");
-    assert_eq!(v12_9.scope_info_index.first_vars, V8_12_9_OFFSETS.scope_info_index.first_vars, "V8 12.9 should use odd offsets");
+    assert_eq!(
+        v12_4.scope_info_index.first_vars, V8_12_OFFSETS.scope_info_index.first_vars,
+        "V8 12.4 should use even offsets"
+    );
+    assert_eq!(
+        v12_9.scope_info_index.first_vars, V8_12_9_OFFSETS.scope_info_index.first_vars,
+        "V8 12.9 should use odd offsets"
+    );
 }
 
 #[test]
 fn test_v8_odd_version_specific_offsets() {
     // Test that odd Node.js versions have different offsets
-    use crate::unwind::v8::{V8_9_6_OFFSETS, V8_10_8_OFFSETS, V8_11_8_OFFSETS, V8_12_9_OFFSETS};
-    use crate::unwind::v8::{V8_9_OFFSETS, V8_10_OFFSETS, V8_11_OFFSETS, V8_12_OFFSETS};
+    use crate::unwind::v8::{V8_10_8_OFFSETS, V8_11_8_OFFSETS, V8_12_9_OFFSETS, V8_9_6_OFFSETS};
+    use crate::unwind::v8::{V8_10_OFFSETS, V8_11_OFFSETS, V8_12_OFFSETS, V8_9_OFFSETS};
 
     // V8 9.6 vs 9.4 - type IDs differ
     assert_ne!(V8_9_6_OFFSETS.v8_type.code, V8_9_OFFSETS.v8_type.code);
     assert_eq!(V8_9_6_OFFSETS.v8_type.code, 161); // 0xa1
-    assert_eq!(V8_9_OFFSETS.v8_type.code, 162);   // Different!
+    assert_eq!(V8_9_OFFSETS.v8_type.code, 162); // Different!
 
     // V8 10.8 vs 10.2 - type IDs differ
     assert_ne!(V8_10_8_OFFSETS.v8_type.code, V8_10_OFFSETS.v8_type.code);
@@ -554,19 +577,25 @@ fn test_v8_odd_version_specific_offsets() {
     assert_eq!(V8_10_OFFSETS.v8_type.code, 240);
 
     // V8 11.8 vs 11.3 - JSFunction offsets differ
-    assert_ne!(V8_11_8_OFFSETS.js_function.shared, V8_11_OFFSETS.js_function.shared);
+    assert_ne!(
+        V8_11_8_OFFSETS.js_function.shared,
+        V8_11_OFFSETS.js_function.shared
+    );
     assert_eq!(V8_11_8_OFFSETS.js_function.shared, 32); // 0x20
     assert_eq!(V8_11_OFFSETS.js_function.shared, 24);
 
     // V8 12.9 vs 12.4 - scope_info_index.first_vars differs!
-    assert_ne!(V8_12_9_OFFSETS.scope_info_index.first_vars, V8_12_OFFSETS.scope_info_index.first_vars);
-    assert_eq!(V8_12_9_OFFSETS.scope_info_index.first_vars, 5);  // CRITICAL!
+    assert_ne!(
+        V8_12_9_OFFSETS.scope_info_index.first_vars,
+        V8_12_OFFSETS.scope_info_index.first_vars
+    );
+    assert_eq!(V8_12_9_OFFSETS.scope_info_index.first_vars, 5); // CRITICAL!
     assert_eq!(V8_12_OFFSETS.scope_info_index.first_vars, 3);
 
     // V8 12.9 vs 12.4 - both use baseline=10 (V8 12.x unified)
     // Note: V8 12.x series unified to baseline=10
-    assert_eq!(V8_12_9_OFFSETS.codekind.baseline, 10);  // 0xa
-    assert_eq!(V8_12_OFFSETS.codekind.baseline, 10);    // 0xa (same)
+    assert_eq!(V8_12_9_OFFSETS.codekind.baseline, 10); // 0xa
+    assert_eq!(V8_12_OFFSETS.codekind.baseline, 10); // 0xa (same)
 
     // But other fields still differ
     assert_ne!(V8_12_9_OFFSETS.v8_type.code, V8_12_OFFSETS.v8_type.code);
@@ -575,21 +604,33 @@ fn test_v8_odd_version_specific_offsets() {
 #[test]
 fn test_v8_version_boundary_conditions() {
     // Test version boundary conditions for minor version ranges
-    use crate::unwind::v8::{V8_9_6_OFFSETS, V8_9_OFFSETS, V8_10_8_OFFSETS, V8_10_OFFSETS};
+    use crate::unwind::v8::{V8_10_8_OFFSETS, V8_10_OFFSETS, V8_9_6_OFFSETS, V8_9_OFFSETS};
 
     // Test boundary at minor=5/6 for V8 9.x
     // Range 0-5 → even, 6-9 → odd
     let v9_5 = get_offsets_for_v8_version(&Version::new(9, 5, 0));
     let v9_6 = get_offsets_for_v8_version(&Version::new(9, 6, 0));
-    assert_eq!(v9_5.v8_type.code, V8_9_OFFSETS.v8_type.code, "V8 9.5 should use even offsets");
-    assert_eq!(v9_6.v8_type.code, V8_9_6_OFFSETS.v8_type.code, "V8 9.6 should use odd offsets");
+    assert_eq!(
+        v9_5.v8_type.code, V8_9_OFFSETS.v8_type.code,
+        "V8 9.5 should use even offsets"
+    );
+    assert_eq!(
+        v9_6.v8_type.code, V8_9_6_OFFSETS.v8_type.code,
+        "V8 9.6 should use odd offsets"
+    );
 
     // Test boundary at minor=7/8 for V8 10.x
     // Range 0-7 → even, 8-9 → odd
     let v10_7 = get_offsets_for_v8_version(&Version::new(10, 7, 0));
     let v10_8 = get_offsets_for_v8_version(&Version::new(10, 8, 0));
-    assert_eq!(v10_7.v8_type.code, V8_10_OFFSETS.v8_type.code, "V8 10.7 should use even offsets");
-    assert_eq!(v10_8.v8_type.code, V8_10_8_OFFSETS.v8_type.code, "V8 10.8 should use odd offsets");
+    assert_eq!(
+        v10_7.v8_type.code, V8_10_OFFSETS.v8_type.code,
+        "V8 10.7 should use even offsets"
+    );
+    assert_eq!(
+        v10_8.v8_type.code, V8_10_8_OFFSETS.v8_type.code,
+        "V8 10.8 should use odd offsets"
+    );
 }
 use crate::unwind::v8_symbolizer::{V8FrameInfo, V8FrameMetadata, V8FrameType, V8Symbolizer};
 

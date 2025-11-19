@@ -31,7 +31,7 @@ use semver::{Version, VersionReq};
 use crate::{
     error::{Error, Result},
     maps::{get_memory_mappings, MemoryArea},
-    utils::{bpf_delete_elem, bpf_update_elem, get_errno, IdGenerator, BPF_ANY},
+    utils::{bpf_delete_elem, bpf_update_elem, get_errno, BPF_ANY},
 };
 
 use super::v8_symbolizer::{V8FrameMetadata, V8Symbolizer};
@@ -461,7 +461,7 @@ impl InterpreterInfo {
         let mut intp = Interpreter::new(pid, exe_area)?;
 
         // Check if the Node.js version is supported
-        let req = VersionReq::parse(">=16.0.0, <=23.0.0").unwrap();
+        let req = VersionReq::parse(">=16.0.0, <24.0.0").unwrap();
         if !req.matches(&intp.node_version) {
             return Err(error_not_supported_version(pid, intp.node_version.clone()));
         }
@@ -1181,10 +1181,10 @@ pub const V8_9_6_OFFSETS: &V8Offsets = &V8Offsets {
         script_or_debug_info: 32,
     },
     code: V8Code {
-        instruction_start: 128, // 0x80
-        instruction_size: 40,   // 0x28
-        flags: 48,              // 0x30
-        deoptimization_data: 16, // 0x10
+        instruction_start: 128,    // 0x80
+        instruction_size: 40,      // 0x28
+        flags: 48,                 // 0x30
+        deoptimization_data: 16,   // 0x10
         source_position_table: 24, // 0x18
     },
     script: V8Script {
@@ -1200,11 +1200,11 @@ pub const V8_9_6_OFFSETS: &V8Offsets = &V8Offsets {
         js_function_first: 2060,   // 0x80c
         js_function_last: 2074,    // 0x81a
         string_first: 0,
-        script: 111,               // 0x6f
-        code: 161,                 // 0xa1
+        script: 111, // 0x6f
+        code: 161,   // 0xa1
     },
     v8_fixed: V8Fixed {
-        first_nonstring_type: 64,        // 0x40
+        first_nonstring_type: 64, // 0x40
         string_representation_mask: 0x7,
         seq_string_tag: 0x0,
         cons_string_tag: 0x1,
@@ -1280,10 +1280,10 @@ pub const V8_10_8_OFFSETS: &V8Offsets = &V8Offsets {
         script_or_debug_info: 32,
     },
     code: V8Code {
-        instruction_start: 128, // 0x80
-        instruction_size: 40,   // 0x28
-        flags: 48,              // 0x30
-        deoptimization_data: 16, // 0x10
+        instruction_start: 128,    // 0x80
+        instruction_size: 40,      // 0x28
+        flags: 48,                 // 0x30
+        deoptimization_data: 16,   // 0x10
         source_position_table: 24, // 0x18
     },
     script: V8Script {
@@ -1299,8 +1299,8 @@ pub const V8_10_8_OFFSETS: &V8Offsets = &V8Offsets {
         js_function_first: 2065,   // 0x811
         js_function_last: 2079,    // 0x81f
         string_first: 0,
-        script: 168,               // 0xa8
-        code: 237,                 // 0xed
+        script: 168, // 0xa8
+        code: 237,   // 0xed
     },
     v8_fixed: V8Fixed {
         first_nonstring_type: 128,
@@ -1382,7 +1382,7 @@ pub const V8_11_8_OFFSETS: &V8Offsets = &V8Offsets {
         instruction_start: 32,     // 0x20 - Different from V8 11.3!
         instruction_size: 44,      // 0x2c - Different from V8 11.3!
         flags: 40,                 // 0x28 - Different from V8 11.3!
-        deoptimization_data: 8,  // 0x8
+        deoptimization_data: 8,    // 0x8
         source_position_table: 16, // 0x10
     },
     script: V8Script {
@@ -1398,8 +1398,8 @@ pub const V8_11_8_OFFSETS: &V8Offsets = &V8Offsets {
         js_function_first: 2066,   // 0x812
         js_function_last: 2081,    // 0x821
         string_first: 0,
-        script: 167,               // 0xa7
-        code: 246,                 // 0xf6 - Different!
+        script: 167, // 0xa7
+        code: 246,   // 0xf6 - Different!
     },
     v8_fixed: V8Fixed {
         first_nonstring_type: 128,
@@ -1497,8 +1497,8 @@ pub const V8_12_9_OFFSETS: &V8Offsets = &V8Offsets {
         js_function_first: 2065,   // 0x811 - Different!
         js_function_last: 2081,    // 0x821
         string_first: 0,
-        script: 167,               // 0xa7
-        code: 186,                 // 0xba - Very different!
+        script: 167, // 0xa7
+        code: 186,   // 0xba - Very different!
     },
     v8_fixed: V8Fixed {
         first_nonstring_type: 128,
@@ -1508,7 +1508,7 @@ pub const V8_12_9_OFFSETS: &V8Offsets = &V8Offsets {
         thin_string_tag: 0x5,
     },
     scope_info_index: V8ScopeInfoIndex {
-        first_vars: 5,       // 0x5 - CRITICAL CHANGE!
+        first_vars: 5, // 0x5 - CRITICAL CHANGE!
         n_context_locals: 2,
     },
     deopt_data_index: V8DeoptimizationDataIndex {
@@ -1547,9 +1547,9 @@ pub const V8_12_9_OFFSETS: &V8Offsets = &V8Offsets {
         fast_construct_frame: 24,
         builtin_frame: 25,
         builtin_exit_frame: 26,
-        native_frame: 29,          // 0x1d - Different!
+        native_frame: 29, // 0x1d - Different!
         api_callback_exit_frame: 27,
-        irregexp_frame: 28,        // Different position
+        irregexp_frame: 28, // Different position
         optimized_frame: 0,
     },
     codekind: V8CodeKind {
@@ -1562,18 +1562,14 @@ pub const V8_12_9_OFFSETS: &V8Offsets = &V8Offsets {
 
 #[derive(Default)]
 pub struct V8UnwindTable {
-    id_gen: IdGenerator,
-    loaded_offsets: HashMap<Version, u8>,
     symbolizers: HashMap<u32, V8Symbolizer>, // Per-process symbolizers
     unwind_info_map_fd: i32,
-    offsets_map_fd: i32,
 }
 
 impl V8UnwindTable {
-    pub unsafe fn new(unwind_info_map_fd: i32, offsets_map_fd: i32) -> Self {
+    pub unsafe fn new(unwind_info_map_fd: i32) -> Self {
         Self {
             unwind_info_map_fd,
-            offsets_map_fd,
             ..Default::default()
         }
     }
@@ -1583,14 +1579,30 @@ impl V8UnwindTable {
         let info = match InterpreterInfo::new(pid) {
             Ok(info) => info,
             Err(_e) => {
-                trace!("This may be due to namespace isolation or missing binary access");
+                trace!("Load failed due to namespace isolation, missing binary access, or unsupported version");
                 return;
             }
         };
 
+        // Check version range: only V8 >= 9.0.0 (Node.js >= 16.x) is supported
+        // For unsupported versions, skip loading unwind_info_map to allow native stack only
         let req = VersionReq::parse(">=9.0.0").unwrap();
         if !req.matches(&info.v8_version) {
+            trace!(
+                "Process#{pid} V8 version {} is not supported (need >= 9.0.0), skipping interpreter unwinding",
+                info.v8_version
+            );
             return;
+        }
+
+        // Additional check: ensure V8 version is <= 12.9.x (latest tested)
+        // Versions beyond this will use V8 12.9 offsets but log a warning
+        if info.v8_version.major > 12 || (info.v8_version.major == 12 && info.v8_version.minor > 9)
+        {
+            trace!(
+                "Process#{pid} V8 version {} is newer than tested versions, using V8 12.9 offsets",
+                info.v8_version
+            );
         }
 
         // Register version for FFI lookup
@@ -1602,11 +1614,9 @@ impl V8UnwindTable {
         // This enables strict O(1) lookup in is_v8_process()
         crate::register_interpreter(pid, crate::InterpreterType::V8);
 
-        let _offsets_id = self.get_or_load_offsets(&info.v8_version);
-
         // Create symbolizer for this process
-        let offsets = self.get_offsets_for_version(&info.v8_version);
-        let symbolizer = V8Symbolizer::new(pid, offsets);
+        let offsets = get_offsets_for_v8_version(&info.v8_version);
+        let symbolizer = V8Symbolizer::new(pid, *offsets);
         self.symbolizers.insert(pid, symbolizer);
 
         // Create V8ProcInfo with all offset fields populated
@@ -1641,49 +1651,6 @@ impl V8UnwindTable {
             );
         } else {
         }
-    }
-
-    fn get_or_load_offsets(&mut self, version: &Version) -> u8 {
-        if let Some(&id) = self.loaded_offsets.get(version) {
-            return id;
-        }
-
-        let id_u32 = self.id_gen.acquire();
-        let id = id_u32 as u8; // Convert u32 to u8
-        let offsets = self.get_offsets_for_version(version);
-
-        unsafe {
-            // For testing with invalid file descriptors, skip BPF operations
-            if self.offsets_map_fd < 0 {
-                trace!("Skip update V8 offsets#{id} due to invalid file descriptor");
-                self.loaded_offsets.insert(version.clone(), id);
-                return id;
-            }
-
-            if bpf_update_elem(
-                self.offsets_map_fd,
-                &id as *const u8 as *const c_void,
-                &offsets as *const V8Offsets as *const c_void,
-                BPF_ANY,
-            ) != 0
-            {
-                warn!(
-                    "Failed to update v8_offsets_map for version {} (ID={}): errno={}",
-                    version,
-                    id,
-                    get_errno()
-                );
-            } else {
-            }
-        }
-
-        self.loaded_offsets.insert(version.clone(), id);
-        id
-    }
-
-    fn get_offsets_for_version(&self, version: &Version) -> V8Offsets {
-        // Use the global function to avoid code duplication
-        *get_offsets_for_v8_version(version)
     }
 
     pub unsafe fn unload(&mut self, pid: u32) {

@@ -249,12 +249,11 @@ int unwind_tracer_init(struct bpf_tracer *tracer) {
 
     // Initialize V8 unwinding tables
     int v8_unwind_info_map_fd = bpf_table_get_fd(tracer, MAP_V8_UNWIND_INFO_NAME);
-    int v8_offsets_map_fd = bpf_table_get_fd(tracer, MAP_V8_OFFSETS_NAME);
-    if (v8_unwind_info_map_fd < 0 || v8_offsets_map_fd < 0) {
-        ebpf_warning("Failed to get V8 unwind info map fd or offsets map fd\n");
+    if (v8_unwind_info_map_fd < 0) {
+        ebpf_warning("Failed to get V8 unwind info map fd\n");
         return -1;
     }
-    v8_unwind_table_t *v8_table = v8_unwind_table_create(v8_unwind_info_map_fd, v8_offsets_map_fd);
+    v8_unwind_table_t *v8_table = v8_unwind_table_create(v8_unwind_info_map_fd);
     pthread_mutex_lock(&g_v8_unwind_table_lock);
     g_v8_unwind_table = v8_table;
     pthread_mutex_unlock(&g_v8_unwind_table_lock);

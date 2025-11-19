@@ -60,14 +60,14 @@ fn test_merge_stacks() {
 fn test_v8_unwind_table_creation() {
     // This would normally require actual BPF map file descriptors
     // For testing, we simulate with invalid fds (should fail gracefully)
-    let _table = unsafe { V8UnwindTable::new(-1, -1) };
+    let _table = unsafe { V8UnwindTable::new(-1) };
     // V8UnwindTable creation completed successfully with mock fds
 }
 
 #[test]
 fn test_v8_unwind_table_lifecycle() {
     // Test full lifecycle: create -> load -> unload
-    let mut table = unsafe { V8UnwindTable::new(-1, -1) };
+    let mut table = unsafe { V8UnwindTable::new(-1) };
     let test_pid = 50000u32;
 
     // Load should not crash even with invalid FDs
@@ -228,7 +228,7 @@ fn test_v8_proc_info_from_offsets() {
 #[test]
 fn test_get_offsets_for_v8_version() {
     // Test offset selection for different V8 versions (updated for minor version matching)
-    use crate::unwind::v8::{V8_9_6_OFFSETS, V8_10_8_OFFSETS, V8_11_8_OFFSETS, V8_12_9_OFFSETS};
+    use crate::unwind::v8::{V8_10_8_OFFSETS, V8_11_8_OFFSETS, V8_12_9_OFFSETS, V8_9_6_OFFSETS};
 
     let test_cases = vec![
         // Even versions
@@ -271,7 +271,7 @@ fn test_concurrent_symbolizer_access() {
     use std::thread;
 
     // Test concurrent access to V8 symbolizer
-    let table = Arc::new(Mutex::new(unsafe { V8UnwindTable::new(-1, -1) }));
+    let table = Arc::new(Mutex::new(unsafe { V8UnwindTable::new(-1) }));
     let mut handles = vec![];
 
     for i in 0..5 {

@@ -180,11 +180,8 @@ pub unsafe extern "C" fn php_unwind_table_unload(table: *mut PhpUnwindTable, pid
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn v8_unwind_table_create(
-    unwind_info_map_fd: i32,
-    offsets_map_fd: i32,
-) -> *mut V8UnwindTable {
-    let table = Box::new(V8UnwindTable::new(unwind_info_map_fd, offsets_map_fd));
+pub unsafe extern "C" fn v8_unwind_table_create(unwind_info_map_fd: i32) -> *mut V8UnwindTable {
+    let table = Box::new(V8UnwindTable::new(unwind_info_map_fd));
     Box::into_raw(table)
 }
 

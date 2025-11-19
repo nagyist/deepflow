@@ -751,9 +751,14 @@ impl PhpUnwindTable {
             }
         };
 
+        // Check version range: only PHP 7.4.0 - 8.3.x is supported
+        // For unsupported versions, skip loading unwind_info_map to allow native stack only
         let req = VersionReq::parse(">=7.4.0, <8.4.0").unwrap();
         if !req.matches(&info.version) {
-            debug!("PHP version {} is not supported", info.version);
+            trace!(
+                "Process#{pid} PHP version {} is not supported (need >= 7.4.0, < 8.4.0), skipping interpreter unwinding",
+                info.version
+            );
             return;
         }
 

@@ -290,8 +290,7 @@ void php_unwind_table_unload(php_unwind_table_t *table, uint32_t pid);
 
 typedef struct v8_unwind_table_t v8_unwind_table_t;
 
-v8_unwind_table_t *v8_unwind_table_create(int32_t unwind_info_map_fd,
-                                          int32_t offsets_map_fd);
+v8_unwind_table_t *v8_unwind_table_create(int32_t unwind_info_map_fd);
 
 void v8_unwind_table_destroy(v8_unwind_table_t *table);
 
