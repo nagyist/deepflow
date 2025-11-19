@@ -1649,8 +1649,8 @@ int unwind_one_v8_frame(unwind_state_t *state, v8_proc_info_t *vi,
 		    bpf_probe_read_user(&code_flags, sizeof(code_flags),
 			(void *)(code + vi->off_Code_flags)) == 0) {
 
-			// V8 version-specific instruction_start handling
-			if (vi->v8_version >= 110304) {
+			// V8 version-specific (v11.1.204) instruction_start handling
+			if (vi->v8_version >= 11010204) {
 				// V8 11.1.204+: instruction_start is a pointer field
 				bpf_probe_read_user(&code_start, sizeof(code_start),
 					(void *)(code + vi->off_Code_instruction_start));

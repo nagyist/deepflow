@@ -227,16 +227,24 @@ fn test_v8_proc_info_from_offsets() {
 
 #[test]
 fn test_get_offsets_for_v8_version() {
-    // Test offset selection for different V8 versions
+    // Test offset selection for different V8 versions (updated for minor version matching)
+    use crate::unwind::v8::{V8_9_6_OFFSETS, V8_10_8_OFFSETS, V8_11_8_OFFSETS, V8_12_9_OFFSETS};
+
     let test_cases = vec![
+        // Even versions
         (Version::new(9, 0, 0), V8_9_OFFSETS),
         (Version::new(9, 4, 146), V8_9_OFFSETS),
         (Version::new(10, 2, 154), V8_10_OFFSETS),
         (Version::new(11, 3, 244), V8_11_OFFSETS),
-        (Version::new(11, 8, 172), V8_11_OFFSETS),
         (Version::new(12, 4, 254), V8_12_OFFSETS),
-        (Version::new(13, 0, 0), V8_12_OFFSETS), // Future versions default to V8 12
-        (Version::new(8, 0, 0), V8_9_OFFSETS),   // Old versions default to V8 9
+        // Odd versions (new)
+        (Version::new(9, 6, 180), V8_9_6_OFFSETS),
+        (Version::new(10, 8, 168), V8_10_8_OFFSETS),
+        (Version::new(11, 8, 172), V8_11_8_OFFSETS),
+        (Version::new(12, 9, 202), V8_12_9_OFFSETS),
+        // Future/old versions
+        (Version::new(13, 0, 0), V8_12_9_OFFSETS), // Future versions default to latest
+        (Version::new(8, 0, 0), V8_9_OFFSETS),     // Old versions default to V8 9
     ];
 
     for (version, expected_offsets) in test_cases {

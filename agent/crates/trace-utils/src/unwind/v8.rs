@@ -314,12 +314,24 @@ impl MappedFile {
     /// Note: This is less accurate than reading from ELF symbols.
     fn node_to_v8_version(&self, node_version: &Version) -> Option<Version> {
         match (node_version.major, node_version.minor) {
+            // Node.js 23.x → V8 12.9.202.26 ~ 12.9.202.28
+            (23, _) => Some(Version::new(12, 9, 202)),
+            // Node.js 22.x → V8 12.4.254.14 ~ 12.4.254.21
             (22, _) => Some(Version::new(12, 4, 254)),
+            // Node.js 21.x → V8 11.8.172.13 ~ 11.8.172.17
             (21, _) => Some(Version::new(11, 8, 172)),
+            // Node.js 20.x → V8 11.3.244.4 ~ 11.3.244.8
             (20, _) => Some(Version::new(11, 3, 244)),
+            // Node.js 19.x → V8 10.7.193.13 ~ 10.8.168.25
+            (19, _) => Some(Version::new(10, 8, 168)),
+            // Node.js 18.x → V8 10.1.124.8 ~ 10.2.154.26
             (18, _) => Some(Version::new(10, 2, 154)),
+            // Node.js 17.x → V8 9.5.172.21 ~ 9.6.180.15
+            (17, _) => Some(Version::new(9, 6, 180)),
+            // Node.js 16.x → V8 9.0.257.17 ~ 9.4.146.26
             (16, _) => Some(Version::new(9, 4, 146)),
-            _ => Some(Version::new(12, 4, 254)), // default to latest
+            // Default to latest for unknown versions
+            _ => Some(Version::new(12, 9, 202)),
         }
     }
 }
@@ -1049,7 +1061,7 @@ pub const V8_11_OFFSETS: &V8Offsets = &V8Offsets {
     },
 };
 
-// V8 12.x offsets (Node.js 22.x, 23.x)
+// V8 12.x offsets (Node.js 22.x)
 pub const V8_12_OFFSETS: &V8Offsets = &V8Offsets {
     frame_pointers: V8FramePointers {
         marker: -8,           // v8dbg_off_fp_context
@@ -1152,6 +1164,402 @@ pub const V8_12_OFFSETS: &V8Offsets = &V8Offsets {
     },
 };
 
+// V8 9.6.x offsets (Node.js 17.x - odd version)
+pub const V8_9_6_OFFSETS: &V8Offsets = &V8Offsets {
+    frame_pointers: V8FramePointers {
+        marker: -8,
+        function: -16,
+        bytecode_offset: -40,
+    },
+    js_function: V8JSFunction {
+        shared: 24,
+        code: 48,
+    },
+    shared_function_info: V8SharedFunctionInfo {
+        name_or_scope_info: 16,
+        function_data: 8,
+        script_or_debug_info: 32,
+    },
+    code: V8Code {
+        instruction_start: 128, // 0x80
+        instruction_size: 40,   // 0x28
+        flags: 48,              // 0x30
+        deoptimization_data: 16, // 0x10
+        source_position_table: 24, // 0x18
+    },
+    script: V8Script {
+        name: 16,
+        source: 8,
+    },
+    bytecode_array: V8BytecodeArray {
+        source_position_table: 32, // 0x20
+    },
+    v8_type: V8Type {
+        scope_info: 177,           // 0xb1
+        shared_function_info: 178, // 0xb2
+        js_function_first: 2060,   // 0x80c
+        js_function_last: 2074,    // 0x81a
+        string_first: 0,
+        script: 111,               // 0x6f
+        code: 161,                 // 0xa1
+    },
+    v8_fixed: V8Fixed {
+        first_nonstring_type: 64,        // 0x40
+        string_representation_mask: 0x7,
+        seq_string_tag: 0x0,
+        cons_string_tag: 0x1,
+        thin_string_tag: 0x5,
+    },
+    scope_info_index: V8ScopeInfoIndex {
+        first_vars: 3,
+        n_context_locals: 2,
+    },
+    deopt_data_index: V8DeoptimizationDataIndex {
+        inlined_function_count: 1,
+        literal_array: 2,
+        shared_function_info: 6,
+        inlining_positions: 7,
+    },
+    heap_object: V8HeapObject { map: 0 },
+    map: V8Map { instance_type: 12 },
+    frame_types: V8FrameTypes {
+        entry_frame: 1,
+        construct_entry_frame: 2,
+        exit_frame: 3,
+        wasm_frame: 4,
+        wasm_to_js_frame: 5,
+        wasm_to_js_function_frame: 0,
+        js_to_wasm_frame: 6,
+        wasm_debug_break_frame: 7,
+        stack_switch_frame: 0,
+        wasm_exit_frame: 9,
+        c_wasm_entry_frame: 8,
+        wasm_compile_lazy_frame: 10,
+        wasm_liftoff_setup_frame: 0,
+        interpreted_frame: 11,
+        baseline_frame: 12,
+        maglev_frame: 0,
+        turbofan_frame: 0,
+        stub_frame: 14,
+        turbofan_stub_with_context_frame: 0,
+        builtin_continuation_frame: 15,
+        js_builtin_continuation_frame: 16,
+        js_builtin_continuation_with_catch_frame: 17,
+        internal_frame: 18,
+        construct_frame: 19,
+        fast_construct_frame: 0,
+        builtin_frame: 20,
+        builtin_exit_frame: 21,
+        native_frame: 22,
+        api_callback_exit_frame: 0,
+        irregexp_frame: 0,
+        optimized_frame: 13,
+    },
+    codekind: V8CodeKind {
+        mask: 15,
+        shift: 0,
+        baseline: 11,
+        interpreted: 10,
+    },
+};
+
+// V8 10.8.x offsets (Node.js 19.x - odd version)
+pub const V8_10_8_OFFSETS: &V8Offsets = &V8Offsets {
+    frame_pointers: V8FramePointers {
+        marker: -8,
+        function: -16,
+        bytecode_offset: -40,
+    },
+    js_function: V8JSFunction {
+        shared: 24,
+        code: 48,
+    },
+    shared_function_info: V8SharedFunctionInfo {
+        name_or_scope_info: 16,
+        function_data: 8,
+        script_or_debug_info: 32,
+    },
+    code: V8Code {
+        instruction_start: 128, // 0x80
+        instruction_size: 40,   // 0x28
+        flags: 48,              // 0x30
+        deoptimization_data: 16, // 0x10
+        source_position_table: 24, // 0x18
+    },
+    script: V8Script {
+        name: 16,
+        source: 8,
+    },
+    bytecode_array: V8BytecodeArray {
+        source_position_table: 32, // 0x20
+    },
+    v8_type: V8Type {
+        scope_info: 253,           // 0xfd
+        shared_function_info: 254, // 0xfe
+        js_function_first: 2065,   // 0x811
+        js_function_last: 2079,    // 0x81f
+        string_first: 0,
+        script: 168,               // 0xa8
+        code: 237,                 // 0xed
+    },
+    v8_fixed: V8Fixed {
+        first_nonstring_type: 128,
+        string_representation_mask: 0x7,
+        seq_string_tag: 0x0,
+        cons_string_tag: 0x1,
+        thin_string_tag: 0x5,
+    },
+    scope_info_index: V8ScopeInfoIndex {
+        first_vars: 3,
+        n_context_locals: 2,
+    },
+    deopt_data_index: V8DeoptimizationDataIndex {
+        inlined_function_count: 1,
+        literal_array: 2,
+        shared_function_info: 6,
+        inlining_positions: 7,
+    },
+    heap_object: V8HeapObject { map: 0 },
+    map: V8Map { instance_type: 12 },
+    frame_types: V8FrameTypes {
+        entry_frame: 1,
+        construct_entry_frame: 2,
+        exit_frame: 3,
+        wasm_frame: 4,
+        wasm_to_js_frame: 5,
+        wasm_to_js_function_frame: 0,
+        js_to_wasm_frame: 7,
+        wasm_debug_break_frame: 8,
+        stack_switch_frame: 0,
+        wasm_exit_frame: 11,
+        c_wasm_entry_frame: 10,
+        wasm_compile_lazy_frame: 12,
+        wasm_liftoff_setup_frame: 0,
+        interpreted_frame: 13,
+        baseline_frame: 14,
+        maglev_frame: 0,
+        turbofan_frame: 0,
+        stub_frame: 17,
+        turbofan_stub_with_context_frame: 0,
+        builtin_continuation_frame: 19,
+        js_builtin_continuation_frame: 20,
+        js_builtin_continuation_with_catch_frame: 21,
+        internal_frame: 22,
+        construct_frame: 23,
+        fast_construct_frame: 0,
+        builtin_frame: 24,
+        builtin_exit_frame: 25,
+        native_frame: 26,
+        api_callback_exit_frame: 0,
+        irregexp_frame: 0,
+        optimized_frame: 0,
+    },
+    codekind: V8CodeKind {
+        mask: 15,
+        shift: 0,
+        baseline: 11,
+        interpreted: 10,
+    },
+};
+
+// V8 11.8.x offsets (Node.js 21.x - odd version)
+pub const V8_11_8_OFFSETS: &V8Offsets = &V8Offsets {
+    frame_pointers: V8FramePointers {
+        marker: -8,
+        function: -16,
+        bytecode_offset: -40,
+    },
+    js_function: V8JSFunction {
+        shared: 32, // 0x20 - Different from V8 11.3!
+        code: 24,   // 0x18 - Different from V8 11.3!
+    },
+    shared_function_info: V8SharedFunctionInfo {
+        name_or_scope_info: 16,
+        function_data: 8,
+        script_or_debug_info: 32,
+    },
+    code: V8Code {
+        instruction_start: 32,     // 0x20 - Different from V8 11.3!
+        instruction_size: 44,      // 0x2c - Different from V8 11.3!
+        flags: 40,                 // 0x28 - Different from V8 11.3!
+        deoptimization_data: 8,  // 0x8
+        source_position_table: 16, // 0x10
+    },
+    script: V8Script {
+        name: 16,
+        source: 8,
+    },
+    bytecode_array: V8BytecodeArray {
+        source_position_table: 32, // 0x20
+    },
+    v8_type: V8Type {
+        scope_info: 263,           // 0x107 - Different!
+        shared_function_info: 264, // 0x108 - Different!
+        js_function_first: 2066,   // 0x812
+        js_function_last: 2081,    // 0x821
+        string_first: 0,
+        script: 167,               // 0xa7
+        code: 246,                 // 0xf6 - Different!
+    },
+    v8_fixed: V8Fixed {
+        first_nonstring_type: 128,
+        string_representation_mask: 0x7,
+        seq_string_tag: 0x0,
+        cons_string_tag: 0x1,
+        thin_string_tag: 0x5,
+    },
+    scope_info_index: V8ScopeInfoIndex {
+        first_vars: 3,
+        n_context_locals: 2,
+    },
+    deopt_data_index: V8DeoptimizationDataIndex {
+        inlined_function_count: 1,
+        literal_array: 2,
+        shared_function_info: 6,
+        inlining_positions: 7,
+    },
+    heap_object: V8HeapObject { map: 0 },
+    map: V8Map { instance_type: 12 },
+    frame_types: V8FrameTypes {
+        entry_frame: 1,
+        construct_entry_frame: 2,
+        exit_frame: 3,
+        wasm_frame: 4,
+        wasm_to_js_frame: 5,
+        wasm_to_js_function_frame: 6,
+        js_to_wasm_frame: 7,
+        wasm_debug_break_frame: 9,
+        stack_switch_frame: 8,
+        wasm_exit_frame: 11,
+        c_wasm_entry_frame: 10,
+        wasm_compile_lazy_frame: 0,
+        wasm_liftoff_setup_frame: 12,
+        interpreted_frame: 13,
+        baseline_frame: 14,
+        maglev_frame: 15,
+        turbofan_frame: 16,
+        stub_frame: 17,
+        turbofan_stub_with_context_frame: 18,
+        builtin_continuation_frame: 19,
+        js_builtin_continuation_frame: 20,
+        js_builtin_continuation_with_catch_frame: 21,
+        internal_frame: 22,
+        construct_frame: 23,
+        fast_construct_frame: 0,
+        builtin_frame: 25,
+        builtin_exit_frame: 26,
+        native_frame: 28,
+        api_callback_exit_frame: 0,
+        irregexp_frame: 27,
+        optimized_frame: 0,
+    },
+    codekind: V8CodeKind {
+        mask: 15,
+        shift: 0,
+        baseline: 11,
+        interpreted: 10,
+    },
+};
+
+// V8 12.9.x offsets (Node.js 23.x - odd version)
+pub const V8_12_9_OFFSETS: &V8Offsets = &V8Offsets {
+    frame_pointers: V8FramePointers {
+        marker: -8,
+        function: -16,
+        bytecode_offset: -40,
+    },
+    js_function: V8JSFunction {
+        shared: 32, // 0x20
+        code: 24,   // 0x18
+    },
+    shared_function_info: V8SharedFunctionInfo {
+        name_or_scope_info: 24, // 0x18 - Different!
+        function_data: 8,
+        script_or_debug_info: 40, // 0x28 - Different!
+    },
+    code: V8Code {
+        instruction_start: 40,     // 0x28
+        instruction_size: 52,      // 0x34
+        flags: 48,                 // 0x30
+        deoptimization_data: 8,    // 0x8
+        source_position_table: 16, // 0x10
+    },
+    script: V8Script {
+        name: 16,
+        source: 8,
+    },
+    bytecode_array: V8BytecodeArray {
+        source_position_table: 32, // 0x20
+    },
+    v8_type: V8Type {
+        scope_info: 279,           // 0x117 - Different!
+        shared_function_info: 281, // 0x119 - Different!
+        js_function_first: 2065,   // 0x811 - Different!
+        js_function_last: 2081,    // 0x821
+        string_first: 0,
+        script: 167,               // 0xa7
+        code: 186,                 // 0xba - Very different!
+    },
+    v8_fixed: V8Fixed {
+        first_nonstring_type: 128,
+        string_representation_mask: 0x7,
+        seq_string_tag: 0x0,
+        cons_string_tag: 0x1,
+        thin_string_tag: 0x5,
+    },
+    scope_info_index: V8ScopeInfoIndex {
+        first_vars: 5,       // 0x5 - CRITICAL CHANGE!
+        n_context_locals: 2,
+    },
+    deopt_data_index: V8DeoptimizationDataIndex {
+        inlined_function_count: 1,
+        literal_array: 2,
+        shared_function_info: 0, // Not found, using wrapper
+        inlining_positions: 7,
+    },
+    heap_object: V8HeapObject { map: 0 },
+    map: V8Map { instance_type: 12 },
+    frame_types: V8FrameTypes {
+        entry_frame: 1,
+        construct_entry_frame: 2,
+        exit_frame: 3,
+        wasm_frame: 4,
+        wasm_to_js_frame: 5,
+        wasm_to_js_function_frame: 6,
+        js_to_wasm_frame: 7,
+        wasm_debug_break_frame: 9,
+        stack_switch_frame: 8,
+        wasm_exit_frame: 11,
+        c_wasm_entry_frame: 10,
+        wasm_compile_lazy_frame: 0,
+        wasm_liftoff_setup_frame: 12,
+        interpreted_frame: 13,
+        baseline_frame: 14,
+        maglev_frame: 15,
+        turbofan_frame: 16,
+        stub_frame: 17,
+        turbofan_stub_with_context_frame: 18,
+        builtin_continuation_frame: 19,
+        js_builtin_continuation_frame: 20,
+        js_builtin_continuation_with_catch_frame: 21,
+        internal_frame: 22,
+        construct_frame: 23,
+        fast_construct_frame: 24,
+        builtin_frame: 25,
+        builtin_exit_frame: 26,
+        native_frame: 29,          // 0x1d - Different!
+        api_callback_exit_frame: 27,
+        irregexp_frame: 28,        // Different position
+        optimized_frame: 0,
+    },
+    codekind: V8CodeKind {
+        mask: 15,
+        shift: 0,
+        baseline: 10,   // 0xa - CRITICAL CHANGE!
+        interpreted: 9, // 0x9 - CRITICAL CHANGE!
+    },
+};
+
 #[derive(Default)]
 pub struct V8UnwindTable {
     id_gen: IdGenerator,
@@ -1202,8 +1610,10 @@ impl V8UnwindTable {
         self.symbolizers.insert(pid, symbolizer);
 
         // Create V8ProcInfo with all offset fields populated
-        let version = info.v8_version.major as u32 * 10000
-            + info.v8_version.minor as u32 * 100
+        // Encoding: major * 1000000 + minor * 10000 + patch
+        // This handles 3-digit patch numbers (e.g., V8 12.9.202)
+        let version = info.v8_version.major as u32 * 1000000
+            + info.v8_version.minor as u32 * 10000
             + info.v8_version.patch as u32;
         trace!(
             "Process#{pid} Final V8 version for BPF: {} (encoded: {})",
@@ -1472,13 +1882,32 @@ fn enhance_single_v8_frame(frame: &str) -> String {
 }
 
 pub fn get_offsets_for_v8_version(version: &Version) -> &'static V8Offsets {
-    match version.major {
-        9 => V8_9_OFFSETS,
-        10 => V8_10_OFFSETS,
-        11 => V8_11_OFFSETS,
-        12 => V8_12_OFFSETS,   // V8 12 support (Node.js 22.x, 23.x)
-        13.. => V8_12_OFFSETS, // Use V8 12 for future versions until they're explicitly supported
-        _ => V8_9_OFFSETS,     // Default to 9.x for older versions
+    // Match by (major, minor) for finer-grained version support
+    // V8 uses minor version ranges:
+    // - Even Node.js versions: minor 0-5 (e.g., 9.4, 10.2, 11.3, 12.4)
+    // - Odd Node.js versions: minor 6-9 (e.g., 9.6, 10.8, 11.8, 12.9)
+    match (version.major, version.minor) {
+        // V8 9.x variants
+        (9, 6..=9) => V8_9_6_OFFSETS, // Node.js 17.x (odd) - V8 9.6.x
+        (9, 0..=5) => V8_9_OFFSETS,   // Node.js 16.x (even) - V8 9.4.x
+
+        // V8 10.x variants
+        (10, 8..=9) => V8_10_8_OFFSETS, // Node.js 19.x (odd) - V8 10.8.x
+        (10, 0..=7) => V8_10_OFFSETS,   // Node.js 18.x (even) - V8 10.2.x
+
+        // V8 11.x variants
+        (11, 8..=9) => V8_11_8_OFFSETS, // Node.js 21.x (odd) - V8 11.8.x
+        (11, 0..=7) => V8_11_OFFSETS,   // Node.js 20.x (even) - V8 11.3.x
+
+        // V8 12.x variants
+        (12, 9) => V8_12_9_OFFSETS,   // Node.js 23.x (odd) - V8 12.9.x
+        (12, 0..=8) => V8_12_OFFSETS, // Node.js 22.x (even) - V8 12.4.x
+
+        // Future versions: use latest
+        (13.., _) => V8_12_9_OFFSETS, // Use V8 12.9 for future versions
+
+        // Older versions: default to V8 9.x
+        _ => V8_9_OFFSETS,
     }
 }
 
