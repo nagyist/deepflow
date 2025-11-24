@@ -316,13 +316,8 @@ fn main() {
         let result = set_feature_pids(FEATURE_DWARF_UNWINDING, pids_array.as_ptr(), num);
         println!("Result {}", result);
 
-        // Set regex to match Python, PHP, and Node.js processes
-        set_dwarf_regex(
-            CString::new("^(python.*|php.*|node.*|nodejs.*)$".as_bytes())
-                .unwrap()
-                .as_c_str()
-                .as_ptr(),
-        );
+        // No need for set_dwarf_regex() when using set_feature_pids(FEATURE_DWARF_UNWINDING)
+        // The explicit PID list takes precedence and skips regex matching
 
         // CPUID will not be included in the aggregation of stack trace data.
         set_profiler_cpu_aggregation(0);

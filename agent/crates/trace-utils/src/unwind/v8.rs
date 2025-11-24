@@ -34,7 +34,12 @@ use crate::{
     utils::{bpf_delete_elem, bpf_update_elem, get_errno, BPF_ANY},
 };
 
-use super::v8_symbolizer::{V8FrameMetadata, V8Symbolizer};
+use super::elf_utils::MappedFile;
+
+// V8 submodules
+pub mod symbolizer;
+
+use symbolizer::{V8FrameMetadata, V8Symbolizer};
 
 // V8 Frame type constants
 // Public constants for reuse in v8_symbolizer module
@@ -71,268 +76,216 @@ fn error_not_supported_version(pid: u32, version: Version) -> Error {
     Error::BadInterpreterVersion(pid, "v8", version)
 }
 
-struct MappedFile {
-    path: PathBuf,
-    contents: Vec<u8>,
-    mem_start: u64,
+// V8/Node.js-specific version extraction utilities
+thread_local! {
+    static NODE_VERSION_REGEX: OnceCell<Regex> = OnceCell::new();
+    static NODE_VERSION_BINARY_REGEX: OnceCell<Regex> = OnceCell::new();
 }
 
-impl MappedFile {
-    fn new(path: &str, mem_start: u64) -> Self {
-        Self {
-            path: PathBuf::from(path),
-            contents: Vec::new(),
-            mem_start,
-        }
-    }
+const NODE_VERSION_REGEX_STR: &str = r"node-v?(\d+)\.(\d+)\.(\d+)";
+// For binary search, match "v18.20.8" format (without "node-" prefix)
+const NODE_VERSION_BINARY_REGEX_STR: &str = r"v(\d+)\.(\d+)\.(\d+)";
 
-    fn load(&mut self) -> Result<()> {
-        if self.contents.is_empty() {
-            self.contents = fs::read(&self.path)?;
-        }
-        Ok(())
-    }
+fn parse_node_version(cap: regex::Captures) -> Option<Version> {
+    Some(Version::new(
+        cap.get(1)?.as_str().parse().ok()?,
+        cap.get(2)?.as_str().parse().ok()?,
+        cap.get(3)?.as_str().parse().ok()?,
+    ))
+}
 
-    fn has_any_symbols(&mut self, symbols: &[&str]) -> Result<bool> {
-        self.load()?;
-        let obj = object::File::parse(&*self.contents)?;
-        Ok(obj.symbols().chain(obj.dynamic_symbols()).any(|s| {
-            if let Ok(name) = s.name() {
-                for sym in symbols {
-                    if &name == sym || name.contains(sym) {
-                        return true;
-                    }
-                }
-            }
-            false
-        }))
-    }
+/// V8 symbols to detect Node.js/V8 processes
+const V8_SYMBOLS: [&str; 5] = [
+    "v8dbg_type_JSFunction",
+    "v8dbg_type_SharedFunctionInfo",
+    "v8dbg_off_HeapObject__map",
+    "v8::internal::Isolate",
+    "V8",
+];
 
-    thread_local! {
-        static NODE_VERSION_REGEX: OnceCell<Regex> = OnceCell::new();
-        static NODE_VERSION_BINARY_REGEX: OnceCell<Regex> = OnceCell::new();
-    }
+/// Check if the mapped file has V8 symbols
+fn has_v8_symbols(file: &mut MappedFile) -> Result<bool> {
+    file.has_any_symbols_matching(&V8_SYMBOLS)
+}
 
-    const NODE_VERSION_REGEX_STR: &'static str = r"node-v?(\d+)\.(\d+)\.(\d+)";
-    // For binary search, match "v18.20.8" format (without "node-" prefix)
-    const NODE_VERSION_BINARY_REGEX_STR: &'static str = r"v(\d+)\.(\d+)\.(\d+)";
+/// Extract Node.js version from filename (e.g., "node-v18.20.8" -> 18.20.8)
+fn extract_version_from_filename(file: &MappedFile) -> Option<Version> {
+    let path_str = file.path.to_str()?;
+    let cap = NODE_VERSION_REGEX.with(|r| {
+        r.get_or_init(|| Regex::new(NODE_VERSION_REGEX_STR).unwrap())
+            .captures(path_str)
+    })?;
+    parse_node_version(cap)
+}
 
-    fn parse_node_version(cap: regex::Captures) -> Option<Version> {
-        Some(Version::new(
-            cap.get(1)?.as_str().parse().ok()?,
-            cap.get(2)?.as_str().parse().ok()?,
-            cap.get(3)?.as_str().parse().ok()?,
-        ))
-    }
+/// Search for Node.js version string in binary data
+fn search_version_in_data(data: &[u8]) -> Option<Version> {
+    // Search for version pattern "vX.Y.Z" in binary data
+    // Node.js embeds version string deep in the binary (can be at 40MB+)
+    // Search entire file, but limit to reasonable size to avoid excessive scanning
+    let search_limit = data.len().min(100 * 1024 * 1024); // Search up to 100MB
 
-    fn version(&self) -> Option<Version> {
-        // First try to extract version from file path
-        if let Some(path_str) = self.path.to_str() {
-            if let Some(c) = Self::NODE_VERSION_REGEX.with(|r| {
-                r.get_or_init(|| Regex::new(Self::NODE_VERSION_REGEX_STR).unwrap())
-                    .captures(path_str)
-            }) {
-                if let Some(v) = Self::parse_node_version(c) {
-                    return Some(v);
-                }
-            }
-        }
-
-        // If path doesn't contain version, try to read from binary data
-        match self.read_node_version_from_binary() {
-            Ok(Some(v)) => Some(v),
-            Ok(None) => {
-                // Could not find version in binary data
-                None
-            }
-            Err(e) => {
-                // Failed to load or search binary
-                warn!(
-                    "Failed to read Node.js version from binary {}: {:?}",
-                    self.path.display(),
-                    e
-                );
-                None
-            }
-        }
-    }
-
-    /// Read Node.js version from embedded strings in the binary.
-    /// Node.js embeds version string like "v18.20.8" in the executable.
-    /// This method assumes that self.contents has already been loaded by prior calls
-    /// (e.g., has_v8_symbols), so it doesn't need to load the file again.
-    fn read_node_version_from_binary(&self) -> Result<Option<Version>> {
-        // If contents not loaded yet, we cannot search. This shouldn't happen
-        // because has_v8_symbols() should have been called before version().
-        if self.contents.is_empty() {
-            // Try to read the file directly since we can't mutate self
-            let data = fs::read(&self.path)?;
-            return Self::search_version_in_data(&data);
-        }
-
-        Self::search_version_in_data(&self.contents)
-    }
-
-    /// Search for Node.js version string in binary data
-    fn search_version_in_data(data: &[u8]) -> Result<Option<Version>> {
-        // Search for version pattern "vX.Y.Z" in binary data
-        // Node.js embeds version string deep in the binary (can be at 40MB+)
-        // Search entire file, but limit to reasonable size to avoid excessive scanning
-        let search_limit = data.len().min(100 * 1024 * 1024); // Search up to 100MB
-
-        for i in 0..search_limit.saturating_sub(20) {
-            if data[i] == b'v' && i + 1 < search_limit && data[i + 1].is_ascii_digit() {
-                // Potential version string found, parse it
-                let end = (i + 20).min(search_limit);
-                if let Ok(version_str) = std::str::from_utf8(&data[i..end]) {
-                    // Use binary-specific regex that matches "vX.Y.Z" format
-                    if let Some(c) = Self::NODE_VERSION_BINARY_REGEX.with(|r| {
-                        r.get_or_init(|| Regex::new(Self::NODE_VERSION_BINARY_REGEX_STR).unwrap())
-                            .captures(version_str)
-                    }) {
-                        if let Some(v) = Self::parse_node_version(c) {
-                            // Sanity check: Node.js versions should be reasonable
-                            if v.major >= 12 && v.major <= 30 {
-                                return Ok(Some(v));
-                            }
+    for i in 0..search_limit.saturating_sub(20) {
+        if data[i] == b'v' && i + 1 < search_limit && data[i + 1].is_ascii_digit() {
+            // Potential version string found, parse it
+            let end = (i + 20).min(search_limit);
+            if let Ok(version_str) = std::str::from_utf8(&data[i..end]) {
+                // Use binary-specific regex that matches "vX.Y.Z" format
+                if let Some(c) = NODE_VERSION_BINARY_REGEX.with(|r| {
+                    r.get_or_init(|| Regex::new(NODE_VERSION_BINARY_REGEX_STR).unwrap())
+                        .captures(version_str)
+                }) {
+                    if let Some(v) = parse_node_version(c) {
+                        // Sanity check: Node.js versions should be reasonable
+                        if v.major >= 12 && v.major <= 30 {
+                            return Some(v);
                         }
                     }
                 }
             }
         }
-
-        Ok(None)
     }
 
-    fn find_symbol_address(&mut self, name: &str) -> Result<Option<u64>> {
-        self.load()?;
-        let obj = object::File::parse(&*self.contents)?;
-        Ok(obj
-            .symbols()
-            .chain(obj.dynamic_symbols())
-            .find(|s| s.name().map(|n| n == name).unwrap_or(false))
-            .map(|s| s.address() + self.mem_start))
+    None
+}
+
+/// Read Node.js version from embedded strings in the binary.
+/// Node.js embeds version string like "v18.20.8" in the executable.
+fn read_node_version_from_binary(file: &MappedFile) -> Option<Version> {
+    // If contents not loaded yet, we cannot search.
+    if file.contents.is_empty() {
+        // Try to read the file directly
+        let data = fs::read(&file.path).ok()?;
+        return search_version_in_data(&data);
     }
 
-    fn has_v8_symbols(&mut self) -> Result<bool> {
-        let v8_symbols = [
-            "v8dbg_type_JSFunction",
-            "v8dbg_type_SharedFunctionInfo",
-            "v8dbg_off_HeapObject__map",
-            "v8::internal::Isolate",
-            "V8",
-        ];
-        self.has_any_symbols(&v8_symbols)
+    search_version_in_data(&file.contents)
+}
+
+/// Extract Node.js version from file (first filename, then binary data)
+fn extract_node_version(file: &MappedFile) -> Option<Version> {
+    // First try to extract version from file path
+    if let Some(v) = extract_version_from_filename(file) {
+        return Some(v);
     }
 
-    /// Read V8 version directly from ELF symbols (accurate method).
-    /// This reads v8::internal::Version::{major,minor,build}_ symbols.
-    /// Symbol names are C++ mangled: _ZN2v88internal7Version6{major|minor|build}_E
-    fn read_v8_version_from_symbols(&mut self) -> Result<Option<Version>> {
-        self.load()?;
-        let obj = object::File::parse(&*self.contents)?;
+    // If path doesn't contain version, try to read from binary data
+    match read_node_version_from_binary(file) {
+        Some(v) => Some(v),
+        None => {
+            // Could not find version in binary data
+            None
+        }
+    }
+}
 
-        // V8 version symbol names (C++ mangled)
-        let major_sym = "_ZN2v88internal7Version6major_E";
-        let minor_sym = "_ZN2v88internal7Version6minor_E";
-        let build_sym = "_ZN2v88internal7Version6build_E";
+/// Read V8 version directly from ELF symbols (accurate method).
+/// This reads v8::internal::Version::{major,minor,build}_ symbols.
+/// Symbol names are C++ mangled: _ZN2v88internal7Version6{major|minor|build}_E
+fn read_v8_version_from_symbols(file: &mut MappedFile) -> Result<Option<Version>> {
+    file.load()?;
+    let obj = object::File::parse(&*file.contents)?;
 
-        // Find all three version symbols
-        let mut major: Option<u32> = None;
-        let mut minor: Option<u32> = None;
-        let mut build: Option<u32> = None;
+    // V8 version symbol names (C++ mangled)
+    let major_sym = "_ZN2v88internal7Version6major_E";
+    let minor_sym = "_ZN2v88internal7Version6minor_E";
+    let build_sym = "_ZN2v88internal7Version6build_E";
 
-        for symbol in obj.symbols().chain(obj.dynamic_symbols()) {
-            if let Ok(name) = symbol.name() {
-                let addr = symbol.address();
+    // Find all three version symbols
+    let mut major: Option<u32> = None;
+    let mut minor: Option<u32> = None;
+    let mut build: Option<u32> = None;
 
-                // Read 4-byte value from symbol data
-                if name == major_sym {
-                    if let Ok(section) = obj
-                        .section_by_index(symbol.section_index().unwrap_or(object::SectionIndex(0)))
-                    {
-                        if let Ok(data) = section.data() {
-                            let offset = (addr - section.address()) as usize;
-                            if offset + 4 <= data.len() {
-                                major = Some(u32::from_le_bytes([
-                                    data[offset],
-                                    data[offset + 1],
-                                    data[offset + 2],
-                                    data[offset + 3],
-                                ]));
-                            }
+    for symbol in obj.symbols().chain(obj.dynamic_symbols()) {
+        if let Ok(name) = symbol.name() {
+            let addr = symbol.address();
+
+            // Read 4-byte value from symbol data
+            if name == major_sym {
+                if let Ok(section) =
+                    obj.section_by_index(symbol.section_index().unwrap_or(object::SectionIndex(0)))
+                {
+                    if let Ok(data) = section.data() {
+                        let offset = (addr - section.address()) as usize;
+                        if offset + 4 <= data.len() {
+                            major = Some(u32::from_le_bytes([
+                                data[offset],
+                                data[offset + 1],
+                                data[offset + 2],
+                                data[offset + 3],
+                            ]));
                         }
                     }
-                } else if name == minor_sym {
-                    if let Ok(section) = obj
-                        .section_by_index(symbol.section_index().unwrap_or(object::SectionIndex(0)))
-                    {
-                        if let Ok(data) = section.data() {
-                            let offset = (addr - section.address()) as usize;
-                            if offset + 4 <= data.len() {
-                                minor = Some(u32::from_le_bytes([
-                                    data[offset],
-                                    data[offset + 1],
-                                    data[offset + 2],
-                                    data[offset + 3],
-                                ]));
-                            }
+                }
+            } else if name == minor_sym {
+                if let Ok(section) =
+                    obj.section_by_index(symbol.section_index().unwrap_or(object::SectionIndex(0)))
+                {
+                    if let Ok(data) = section.data() {
+                        let offset = (addr - section.address()) as usize;
+                        if offset + 4 <= data.len() {
+                            minor = Some(u32::from_le_bytes([
+                                data[offset],
+                                data[offset + 1],
+                                data[offset + 2],
+                                data[offset + 3],
+                            ]));
                         }
                     }
-                } else if name == build_sym {
-                    if let Ok(section) = obj
-                        .section_by_index(symbol.section_index().unwrap_or(object::SectionIndex(0)))
-                    {
-                        if let Ok(data) = section.data() {
-                            let offset = (addr - section.address()) as usize;
-                            if offset + 4 <= data.len() {
-                                build = Some(u32::from_le_bytes([
-                                    data[offset],
-                                    data[offset + 1],
-                                    data[offset + 2],
-                                    data[offset + 3],
-                                ]));
-                            }
+                }
+            } else if name == build_sym {
+                if let Ok(section) =
+                    obj.section_by_index(symbol.section_index().unwrap_or(object::SectionIndex(0)))
+                {
+                    if let Ok(data) = section.data() {
+                        let offset = (addr - section.address()) as usize;
+                        if offset + 4 <= data.len() {
+                            build = Some(u32::from_le_bytes([
+                                data[offset],
+                                data[offset + 1],
+                                data[offset + 2],
+                                data[offset + 3],
+                            ]));
                         }
                     }
                 }
             }
         }
-
-        // If we found both major and minor, construct Version
-        // Note: build version is less critical and often 0 in some V8 builds
-        if let (Some(maj), Some(min)) = (major, minor) {
-            // Build might be available, default to 0 if not found
-            let bld = build.unwrap_or(0);
-            return Ok(Some(Version::new(maj as u64, min as u64, bld as u64)));
-        }
-
-        Ok(None)
     }
 
-    /// Fallback: Map Node.js version to approximate V8 version.
-    /// Note: This is less accurate than reading from ELF symbols.
-    fn node_to_v8_version(&self, node_version: &Version) -> Option<Version> {
-        match (node_version.major, node_version.minor) {
-            // Node.js 23.x → V8 12.9.202.26 ~ 12.9.202.28
-            (23, _) => Some(Version::new(12, 9, 202)),
-            // Node.js 22.x → V8 12.4.254.14 ~ 12.4.254.21
-            (22, _) => Some(Version::new(12, 4, 254)),
-            // Node.js 21.x → V8 11.8.172.13 ~ 11.8.172.17
-            (21, _) => Some(Version::new(11, 8, 172)),
-            // Node.js 20.x → V8 11.3.244.4 ~ 11.3.244.8
-            (20, _) => Some(Version::new(11, 3, 244)),
-            // Node.js 19.x → V8 10.7.193.13 ~ 10.8.168.25
-            (19, _) => Some(Version::new(10, 8, 168)),
-            // Node.js 18.x → V8 10.1.124.8 ~ 10.2.154.26
-            (18, _) => Some(Version::new(10, 2, 154)),
-            // Node.js 17.x → V8 9.5.172.21 ~ 9.6.180.15
-            (17, _) => Some(Version::new(9, 6, 180)),
-            // Node.js 16.x → V8 9.0.257.17 ~ 9.4.146.26
-            (16, _) => Some(Version::new(9, 4, 146)),
-            // Default to latest for unknown versions
-            _ => Some(Version::new(12, 9, 202)),
-        }
+    // If we found both major and minor, construct Version
+    // Note: build version is less critical and often 0 in some V8 builds
+    if let (Some(maj), Some(min)) = (major, minor) {
+        // Build might be available, default to 0 if not found
+        let bld = build.unwrap_or(0);
+        return Ok(Some(Version::new(maj as u64, min as u64, bld as u64)));
+    }
+
+    Ok(None)
+}
+
+/// Fallback: Map Node.js version to approximate V8 version.
+/// Note: This is less accurate than reading from ELF symbols.
+fn node_to_v8_version(node_version: &Version) -> Option<Version> {
+    match (node_version.major, node_version.minor) {
+        // Node.js 23.x → V8 12.9.202.26 ~ 12.9.202.28
+        (23, _) => Some(Version::new(12, 9, 202)),
+        // Node.js 22.x → V8 12.4.254.14 ~ 12.4.254.21
+        (22, _) => Some(Version::new(12, 4, 254)),
+        // Node.js 21.x → V8 11.8.172.13 ~ 11.8.172.17
+        (21, _) => Some(Version::new(11, 8, 172)),
+        // Node.js 20.x → V8 11.3.244.4 ~ 11.3.244.8
+        (20, _) => Some(Version::new(11, 3, 244)),
+        // Node.js 19.x → V8 10.7.193.13 ~ 10.8.168.25
+        (19, _) => Some(Version::new(10, 8, 168)),
+        // Node.js 18.x → V8 10.1.124.8 ~ 10.2.154.26
+        (18, _) => Some(Version::new(10, 2, 154)),
+        // Node.js 17.x → V8 9.5.172.21 ~ 9.6.180.15
+        (17, _) => Some(Version::new(9, 6, 180)),
+        // Node.js 16.x → V8 9.0.257.17 ~ 9.4.146.26
+        (16, _) => Some(Version::new(9, 4, 146)),
+        // Default to latest for unknown versions
+        _ => Some(Version::new(12, 9, 202)),
     }
 }
 
@@ -348,19 +301,19 @@ impl Interpreter {
         // from the target process's mount namespace
         let real_path = Self::build_namespaced_path(pid, &exe_area.path);
 
-        let mut exe = MappedFile::new(&real_path, exe_area.m_start);
+        let mut exe = MappedFile::from_str(&real_path, exe_area.m_start);
 
-        if !exe.has_v8_symbols()? {
+        if !has_v8_symbols(&mut exe)? {
             // Try fallback to direct path if namespaced path failed
-            exe = MappedFile::new(&exe_area.path, exe_area.m_start);
+            exe = MappedFile::from_str(&exe_area.path, exe_area.m_start);
 
-            if !exe.has_v8_symbols()? {
+            if !has_v8_symbols(&mut exe)? {
                 return Err(error_not_v8(pid));
             }
         }
 
         // Try to get Node.js version for informational purposes
-        let node_version_opt = exe.version();
+        let node_version_opt = extract_node_version(&exe);
         let has_node_version = node_version_opt.is_some();
         let node_version = node_version_opt.unwrap_or_else(|| {
             // If version detection fails, use a reasonable default for Node.js 18.x
@@ -372,7 +325,7 @@ impl Interpreter {
         });
 
         // Try to read V8 version directly from ELF symbols (most accurate)
-        let v8_version = match exe.read_v8_version_from_symbols() {
+        let v8_version = match read_v8_version_from_symbols(&mut exe) {
             Ok(Some(version)) => {
                 if has_node_version {
                     trace!(
@@ -395,8 +348,7 @@ impl Interpreter {
                     node_version
                 );
                 // Fallback: Try Node.js version from path + mapping
-                exe.node_to_v8_version(&node_version)
-                    .unwrap_or_else(|| Version::new(11, 3, 244))
+                node_to_v8_version(&node_version).unwrap_or_else(|| Version::new(11, 3, 244))
             }
             Err(e) => {
                 warn!(
@@ -404,8 +356,7 @@ impl Interpreter {
                     e
                 );
                 // Fallback: Try Node.js version from path + mapping
-                exe.node_to_v8_version(&node_version)
-                    .unwrap_or_else(|| Version::new(11, 3, 244))
+                node_to_v8_version(&node_version).unwrap_or_else(|| Version::new(11, 3, 244))
             }
         };
 
@@ -1956,12 +1907,10 @@ pub unsafe extern "C" fn merge_v8_stacks(
 }
 
 // Re-export resolve_v8_frame so cbindgen can find it
-pub use super::v8_symbolizer::resolve_v8_frame;
+pub use symbolizer::resolve_v8_frame;
 
 #[cfg(test)]
-#[path = "v8/tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "v8/integration_tests.rs"]
 mod integration_tests;

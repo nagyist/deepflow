@@ -21,28 +21,31 @@ use std::{
     fs,
     io::Write,
     mem,
-    path::{Path, PathBuf},
+    path::PathBuf,
     slice,
     sync::{Mutex, OnceLock},
 };
 
 use libc::c_void;
 use log::{debug, trace, warn};
-use object::{
-    elf,
-    read::elf::{FileHeader, ProgramHeader, SectionHeader},
-    Object, ObjectSymbol,
-};
+use object::{Object, ObjectSymbol};
 use regex::Regex;
 use semver::{Version, VersionReq};
 
 use crate::{
     error::{Error, Result},
     maps::{get_memory_mappings, MemoryArea},
-    unwind::php_jit::PhpJitSupport,
-    unwind::php_opcache::PhpOpcacheSupport,
     utils::{bpf_delete_elem, bpf_update_elem, get_errno, IdGenerator, BPF_ANY},
 };
+
+use super::elf_utils::MappedFile;
+
+// PHP submodules
+pub mod jit;
+pub mod opcache;
+
+use jit::PhpJitSupport;
+use opcache::PhpOpcacheSupport;
 
 /// Global PHP process version registry (mirrors V8 implementation for performance)
 /// This allows O(1) offset lookup during symbolization instead of repeatedly parsing ELF files
@@ -72,176 +75,60 @@ fn error_not_supported_version(pid: u32, version: Version) -> Error {
     Error::BadInterpreterVersion(pid, "php", version)
 }
 
-struct MappedFile {
-    path: PathBuf,
-    contents: Vec<u8>,
-    mem_start: u64,
+// PHP-specific version extraction utilities
+thread_local! {
+    static PHP_VERSION_REGEX: OnceCell<Regex> = OnceCell::new();
 }
 
-impl MappedFile {
-    fn load(&mut self) -> Result<()> {
-        if self.contents.is_empty() {
-            self.contents = fs::read(&self.path)?;
+const PHP_VERSION_REGEX_STR: &str = r"(([0-9]+)\.([0-9]+)\.([0-9]+))";
+
+fn parse_php_version(cap: regex::Captures) -> Option<Version> {
+    Some(Version::new(
+        cap.get(2)?.as_str().parse().ok()?,
+        cap.get(3)?.as_str().parse().ok()?,
+        cap.get(4)?.as_str().parse().ok()?,
+    ))
+}
+
+/// Extract PHP version from filename (e.g., "php8.1" -> 8.1.0)
+fn extract_version_from_filename(file: &MappedFile) -> Option<Version> {
+    let filename = file.file_name()?;
+    let cap = PHP_VERSION_REGEX.with(|r| {
+        r.get_or_init(|| Regex::new(PHP_VERSION_REGEX_STR).unwrap())
+            .captures(filename)
+    })?;
+    match parse_php_version(cap) {
+        Some(v) => Some(v),
+        None => {
+            debug!("Cannot find PHP version from file {}", file.path.display());
+            None
         }
-        Ok(())
     }
+}
 
-    fn has_any_symbols(&mut self, symbols: &[&str]) -> Result<bool> {
-        self.load()?;
-        let obj = object::File::parse(&*self.contents)?;
-        Ok(obj.symbols().chain(obj.dynamic_symbols()).any(|s| {
-            if let Ok(name) = s.name() {
-                for sym in symbols {
-                    if &name == sym {
-                        return true;
-                    }
-                }
-            }
-            false
-        }))
-    }
+/// Extract PHP version from rodata by looking for "X-Powered-By: PHP/" string
+fn extract_version_from_rodata(file: &MappedFile) -> Option<Version> {
+    let needle = b"X-Powered-By: PHP/";
 
-    thread_local! {
-        static VERSION_REGEX: OnceCell<Regex> = OnceCell::new();
-    }
+    // Search for the version string in the binary data
+    let pos = file
+        .contents
+        .windows(needle.len())
+        .position(|window| window == needle)?;
 
-    const VERSION_REGEX_STR: &'static str = r"(([0-9]+)\.([0-9]+)\.([0-9]+))";
+    let start = pos + needle.len();
+    let end = file.contents[start..]
+        .iter()
+        .position(|&b| b == 0 || b == b'\r' || b == b'\n')
+        .map(|p| start + p)
+        .unwrap_or(file.contents.len());
 
-    fn parse_version(cap: regex::Captures) -> Option<Version> {
-        Some(Version::new(
-            cap.get(2)?.as_str().parse().ok()?,
-            cap.get(3)?.as_str().parse().ok()?,
-            cap.get(4)?.as_str().parse().ok()?,
-        ))
-    }
-
-    fn version(&self) -> Option<Version> {
-        if let Some(c) = self
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .and_then(|s| {
-                Self::VERSION_REGEX.with(|r| {
-                    r.get_or_init(|| Regex::new(Self::VERSION_REGEX_STR).unwrap())
-                        .captures(s)
-                })
-            })
-        {
-            match Self::parse_version(c) {
-                Some(v) => return Some(v),
-                None => debug!("Cannot find PHP version from file {}", self.path.display()),
-            }
-        }
-        None
-    }
-
-    fn find_text_section_program_header<P: AsRef<Path>>(
-        path: P,
-        data: &[u8],
-    ) -> Result<Option<&elf::ProgramHeader64<object::Endianness>>> {
-        let elf = elf::FileHeader64::<object::Endianness>::parse(data)?;
-        let endian = elf.endian()?;
-        let sec_headers = elf.section_headers(endian, data)?;
-        let sec_strs = elf.section_strings(endian, data, sec_headers)?;
-        let Some(th) = sec_headers
-            .iter()
-            .find(|h| h.name(endian, sec_strs) == Ok(".text".as_bytes()))
-        else {
-            debug!("Cannot find .text section in {}", path.as_ref().display());
-            return Ok(None);
-        };
-        for ph in elf.program_headers(endian, data)? {
-            if ph.p_type(endian) == elf::PT_LOAD && ph.p_flags(endian) & elf::PF_X != 0 {
-                let th_addr = th.sh_addr(endian);
-                let ph_vaddr = ph.p_vaddr(endian);
-                let ph_memsz = ph.p_memsz(endian);
-                if th_addr >= ph_vaddr && th_addr < ph_vaddr + ph_memsz {
-                    return Ok(Some(ph));
-                }
-            }
-        }
-        trace!(
-            "Cannot find .text section program header in {}",
-            path.as_ref().display()
-        );
-        Ok(None)
-    }
-
-    fn base_address(&mut self) -> Result<u64> {
-        self.load()?;
-        let elf = elf::FileHeader64::<object::Endianness>::parse(&*self.contents)?;
-        let endian = elf.endian()?;
-        let Some(ph) = Self::find_text_section_program_header(&self.path, &*self.contents)? else {
-            return Ok(self.mem_start);
-        };
-        Ok(self.mem_start.saturating_sub(ph.p_vaddr(endian)))
-    }
-
-    fn find_symbol_address(&mut self, name: &str) -> Result<Option<u64>> {
-        self.load()?;
-        let ba = self.base_address()?;
-        let obj = object::File::parse(&*self.contents)?;
-        Ok(obj
-            .symbols()
-            .chain(obj.dynamic_symbols())
-            .find(|s| s.name().map(|n| n == name).unwrap_or(false))
-            .map(|s| s.address() + ba))
-    }
-
-    /// Find a symbol's runtime absolute address range (start, end-exclusive)
-    fn find_symbol_range(&mut self, name: &str) -> Result<Option<(u64, u64)>> {
-        self.load()?;
-        let ba = self.base_address()?;
-        let obj = object::File::parse(&*self.contents)?;
-
-        let mut syms: Vec<_> = obj
-            .symbols()
-            .chain(obj.dynamic_symbols())
-            .filter(|s| s.address() != 0 && s.name().map(|n| !n.is_empty()).unwrap_or(false))
-            .collect();
-        syms.sort_by_key(|s| s.address());
-
-        let pos = syms
-            .iter()
-            .position(|s| s.name().map(|n| n == name).unwrap_or(false));
-        let Some(idx) = pos else { return Ok(None) };
-        let start = syms[idx].address() + ba;
-        let end = syms
-            .get(idx + 1)
-            .map(|s| s.address() + ba)
-            .unwrap_or(start + 0x2000); // conservative fallback if size is unknown
-        Ok(Some((start, end)))
-    }
-
-    /// Extract PHP version from rodata by looking for "X-Powered-By: PHP/" string
-    fn extract_version_from_rodata(&mut self) -> Result<Option<Version>> {
-        self.load()?;
-        let needle = b"X-Powered-By: PHP/";
-
-        // Search for the version string in the binary data
-        if let Some(pos) = self
-            .contents
-            .windows(needle.len())
-            .position(|window| window == needle)
-        {
-            let start = pos + needle.len();
-            let end = self.contents[start..]
-                .iter()
-                .position(|&b| b == 0 || b == b'\r' || b == b'\n')
-                .map(|p| start + p)
-                .unwrap_or(self.contents.len());
-
-            if let Ok(version_str) = std::str::from_utf8(&self.contents[start..end]) {
-                if let Some(cap) = Self::VERSION_REGEX.with(|r| {
-                    r.get_or_init(|| Regex::new(Self::VERSION_REGEX_STR).unwrap())
-                        .captures(version_str)
-                }) {
-                    return Ok(Self::parse_version(cap));
-                }
-            }
-        }
-        Ok(None)
-    }
+    let version_str = std::str::from_utf8(&file.contents[start..end]).ok()?;
+    let cap = PHP_VERSION_REGEX.with(|r| {
+        r.get_or_init(|| Regex::new(PHP_VERSION_REGEX_STR).unwrap())
+            .captures(version_str)
+    })?;
+    parse_php_version(cap)
 }
 
 struct Interpreter {
@@ -259,16 +146,8 @@ impl Interpreter {
 
     fn new(pid: u32, exe: &MemoryArea, lib: Option<&MemoryArea>) -> Result<Self> {
         let base: PathBuf = ["/proc", &pid.to_string(), "root"].iter().collect();
-        let mut exe = MappedFile {
-            path: base.join(&exe.path[1..]),
-            contents: vec![],
-            mem_start: exe.mx_start,
-        };
-        let mut lib = lib.map(|m| MappedFile {
-            path: base.join(&m.path[1..]),
-            contents: vec![],
-            mem_start: m.mx_start,
-        });
+        let mut exe = MappedFile::new(base.join(&exe.path[1..]), exe.mx_start);
+        let mut lib = lib.map(|m| MappedFile::new(base.join(&m.path[1..]), m.mx_start));
         if !Self::is_php(&mut exe, lib.as_mut())? {
             return Err(error_not_php(pid));
         }
@@ -278,7 +157,7 @@ impl Interpreter {
 
         // First try to get version from filename
         for file in [Some(&exe), lib.as_ref()] {
-            if let Some(v) = file.and_then(|f| f.version()) {
+            if let Some(v) = file.and_then(extract_version_from_filename) {
                 version.replace(v);
             }
         }
@@ -287,9 +166,12 @@ impl Interpreter {
         if version.is_none() {
             for file in [Some(&mut exe), lib.as_mut()] {
                 if let Some(file) = file {
-                    if let Ok(Some(v)) = file.extract_version_from_rodata() {
-                        version.replace(v);
-                        break;
+                    // Ensure file is loaded before extracting version from rodata
+                    if file.load().is_ok() {
+                        if let Some(v) = extract_version_from_rodata(file) {
+                            version.replace(v);
+                            break;
+                        }
                     }
                 }
             }
@@ -317,13 +199,7 @@ impl Interpreter {
 
     fn is_php(exe: &mut MappedFile, lib: Option<&mut MappedFile>) -> Result<bool> {
         // Check if executable name contains "php"
-        if exe
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.contains("php"))
-            .unwrap_or(false)
-        {
+        if exe.file_name_contains("php") {
             exe.has_any_symbols(&Self::EXE_SYMBOLS)
         } else if let Some(lib) = lib {
             // Check for libphp.so
@@ -582,6 +458,10 @@ fn get_offsets_for_version(version: &Version) -> &'static PhpOffsets {
 pub struct PhpUnwindTable {
     id_gen: IdGenerator,
     loaded_offsets: HashMap<Version, u8>,
+    // Reference counting: tracks how many processes are using each version
+    version_ref_counts: HashMap<Version, u32>,
+    // Process-to-version mapping: used to determine which version's ref count to decrease on process exit
+    process_versions: HashMap<u32, Version>,
 
     unwind_info_map_fd: i32,
     offsets_map_fd: i32,
@@ -778,7 +658,16 @@ impl PhpUnwindTable {
 
         let key = Version::new(info.version.major, info.version.minor, 0);
         let offsets_id = match self.loaded_offsets.get(&key) {
-            Some(id) => *id,
+            Some(id) => {
+                // Version already exists, increment reference count
+                *self.version_ref_counts.entry(key.clone()).or_insert(0) += 1;
+                trace!(
+                    "PHP version {} reference count increased to {}",
+                    key,
+                    self.version_ref_counts[&key]
+                );
+                *id
+            }
             None => {
                 let id = self.id_gen.acquire();
                 let offsets = get_offsets_for_version(&info.version);
@@ -786,10 +675,20 @@ impl PhpUnwindTable {
                     self.id_gen.release(id);
                     return;
                 }
-                self.loaded_offsets.insert(key, id as u8);
+                self.loaded_offsets.insert(key.clone(), id as u8);
+                // New version, initialize reference count to 1
+                self.version_ref_counts.insert(key.clone(), 1);
+                trace!(
+                    "PHP version {} loaded with ID {} (initial reference count: 1)",
+                    key,
+                    id
+                );
                 id as u8
             }
         };
+
+        // Record process-to-version mapping
+        self.process_versions.insert(pid, key);
 
         let jit_return_address = if info.version >= Version::new(8, 0, 0) {
             // Try to recover JIT return address for PHP 8+
@@ -826,6 +725,39 @@ impl PhpUnwindTable {
     pub unsafe fn unload(&mut self, pid: u32) {
         // Suppressed noisy trace log for routine cleanup operations
         // trace!("unload PHP unwind info for process#{pid}");
+
+        // Check which PHP version this process was using
+        if let Some(version) = self.process_versions.remove(&pid) {
+            // Decrease the reference count for this version
+            if let Some(ref_count) = self.version_ref_counts.get_mut(&version) {
+                *ref_count -= 1;
+                trace!(
+                    "PHP version {} reference count decreased to {}",
+                    version,
+                    *ref_count
+                );
+
+                // If reference count reaches 0, clean up version-related resources
+                if *ref_count == 0 {
+                    if let Some(offsets_id) = self.loaded_offsets.remove(&version) {
+                        // Delete offset data from eBPF map
+                        self.delete_offsets_map(offsets_id);
+
+                        // Release ID for reuse
+                        self.id_gen.release(offsets_id as u32);
+
+                        trace!(
+                            "PHP version {} completely unloaded (ID {} released)",
+                            version,
+                            offsets_id
+                        );
+                    }
+
+                    // Remove reference count record
+                    self.version_ref_counts.remove(&version);
+                }
+            }
+        }
 
         // Remove from global version registry
         if let Ok(mut registry) = get_php_version_registry().lock() {
@@ -887,6 +819,27 @@ impl PhpUnwindTable {
                     warn!(
                         "delete PHP unwind info for process#{pid} failed: bpf_delete_elem() returned {errno}"
                     );
+                }
+            }
+            ret
+        }
+    }
+
+    unsafe fn delete_offsets_map(&self, id: u8) -> i32 {
+        // For testing with invalid file descriptors, return early
+        if self.offsets_map_fd < 0 {
+            trace!("skip delete PHP offsets#{id} due to invalid file descriptor");
+            return 0; // Return success for tests
+        }
+
+        trace!("delete PHP offsets#{id}");
+        unsafe {
+            let ret = bpf_delete_elem(self.offsets_map_fd, &id as *const u8 as *const c_void);
+            if ret != 0 {
+                let errno = get_errno();
+                // ignoring non exist error
+                if errno != libc::ENOENT {
+                    warn!("delete PHP offsets#{id} failed: bpf_delete_elem() returned {errno}");
                 }
             }
             ret
@@ -1134,6 +1087,45 @@ pub unsafe extern "C" fn merge_php_stacks(
 }
 
 /// Resolve PHP frame to human-readable symbol
+/// Helper function to allocate a C string using clib_mem_alloc_aligned
+/// This ensures PHP symbols use the same memory allocator as V8 symbols
+unsafe fn allocate_clib_string(symbol: String) -> *mut std::os::raw::c_char {
+    use log::error;
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+
+    match CString::new(symbol) {
+        Ok(c_str) => {
+            let bytes = c_str.as_bytes_with_nul();
+            let len = bytes.len();
+
+            extern "C" {
+                fn clib_mem_alloc_aligned(
+                    tag: *const c_char,
+                    size: usize,
+                    align: usize,
+                    heap: *mut std::ffi::c_void,
+                ) -> *mut c_char;
+            }
+
+            let tag = b"php_symbol\0".as_ptr() as *const c_char;
+            let ptr = clib_mem_alloc_aligned(tag, len, 0, std::ptr::null_mut());
+
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, ptr, len);
+                ptr
+            } else {
+                error!("[PHP] Failed to allocate memory for symbol");
+                std::ptr::null_mut()
+            }
+        }
+        Err(_e) => {
+            error!("[PHP] Failed to create CString: {:?}", _e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Called from C stringifier code to symbolize PHP stack frames
 ///
 /// PERFORMANCE OPTIMIZATION: Uses O(1) global registry lookup instead of
@@ -1146,8 +1138,7 @@ pub unsafe extern "C" fn resolve_php_frame(
     lineno_and_type: u64, // Packed: (type_info << 32) | lineno
     _is_jit: u64, // JIT flag used in eBPF for ARM64 SP adjustment; unused in symbolization per unified [PHP] suffix
 ) -> *mut std::os::raw::c_char {
-    use crate::remotememory::RemoteMemory;
-    use std::ffi::CString;
+    use crate::remote_memory::RemoteMemory;
 
     // Unpack type_info and lineno
     let type_info = (lineno_and_type >> 32) as u32;
@@ -1167,12 +1158,12 @@ pub unsafe extern "C" fn resolve_php_frame(
             Ok(ptr) => ptr,
             Err(_) => {
                 // Check if this is top-level code using type_info
-                if type_info & ZEND_CALL_TOP_CODE != 0 {
-                    let symbol = format!("<top-level>:{} [PHP]", lineno);
-                    return CString::new(symbol).unwrap().into_raw();
-                }
-                let fallback = format!("<func>@{:#x}:{} [PHP]", zend_function_ptr, lineno);
-                return CString::new(fallback).unwrap().into_raw();
+                let symbol = if type_info & ZEND_CALL_TOP_CODE != 0 {
+                    format!("<top-level>:{} [PHP]", lineno)
+                } else {
+                    format!("<func>@{:#x}:{} [PHP]", zend_function_ptr, lineno)
+                };
+                return allocate_clib_string(symbol);
             }
         };
 
@@ -1186,7 +1177,7 @@ pub unsafe extern "C" fn resolve_php_frame(
         // Check if this is top-level code using type_info
         if type_info & ZEND_CALL_TOP_CODE != 0 {
             let symbol = format!("<top-level>:{} [PHP]", lineno);
-            return CString::new(symbol).unwrap().into_raw();
+            return allocate_clib_string(symbol);
         }
     }
 
@@ -1218,8 +1209,8 @@ pub unsafe extern "C" fn resolve_php_frame(
         }
     };
 
-    // Return as C string
-    CString::new(symbol).unwrap().into_raw()
+    // Allocate and return C string using clib_mem_alloc_aligned
+    allocate_clib_string(symbol)
 }
 
 /// Check if a process is PHP
@@ -1263,9 +1254,7 @@ pub unsafe extern "C" fn is_php_process(pid: u32) -> bool {
 }
 
 #[cfg(test)]
-#[path = "php/tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "php/integration_tests.rs"]
 mod integration_tests;

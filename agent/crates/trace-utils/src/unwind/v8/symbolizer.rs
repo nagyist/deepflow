@@ -28,9 +28,9 @@
 
 use std::collections::HashMap;
 
-use crate::{error::Result, remotememory::RemoteMemory};
+use crate::{error::Result, remote_memory::RemoteMemory};
 
-use super::v8::{
+use super::{
     V8Offsets, V8_FILE_TYPE_BYTECODE, V8_FILE_TYPE_MARKER, V8_FILE_TYPE_MASK,
     V8_FILE_TYPE_NATIVE_CODE, V8_FILE_TYPE_NATIVE_JSFUNC, V8_FILE_TYPE_NATIVE_SFI,
 };
@@ -1231,8 +1231,8 @@ pub unsafe extern "C" fn resolve_v8_frame(
     delta_or_marker: u64,
     sfi_fallback: u64,
 ) -> *mut std::os::raw::c_char {
-    use super::v8::get_offsets_for_pid;
-    use crate::remotememory::RemoteMemory;
+    use super::get_offsets_for_pid;
+    use crate::remote_memory::RemoteMemory;
     use log::error;
     use std::ffi::CString;
     use std::os::raw::c_char;
@@ -1744,5 +1744,4 @@ fn read_script_name(mem: &RemoteMemory, sfi_ptr: u64, offsets: &V8Offsets) -> Re
 }
 
 #[cfg(test)]
-#[path = "v8/symbolizer_tests.rs"]
-mod symbolizer_tests;
+mod tests;

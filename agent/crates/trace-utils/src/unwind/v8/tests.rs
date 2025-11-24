@@ -632,7 +632,7 @@ fn test_v8_version_boundary_conditions() {
         "V8 10.8 should use odd offsets"
     );
 }
-use crate::unwind::v8_symbolizer::{V8FrameInfo, V8FrameMetadata, V8FrameType, V8Symbolizer};
+use crate::unwind::v8::symbolizer::{V8FrameInfo, V8FrameMetadata, V8FrameType, V8Symbolizer};
 
 #[test]
 fn test_v8_frame_info_creation() {

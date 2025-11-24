@@ -611,18 +611,17 @@ static char *build_stack_trace_string(struct bpf_tracer *t,
 
 		// Check if this is a V8 frame using frame_types array
 		if (stack.frame_types[i] == FRAME_TYPE_V8) {
-			// Extract pointer_and_type from addrs, delta_or_marker from extra_data_a,
-			// and sfi_fallback from extra_data_b
+			// Extract V8 frame information
+			// ips[i] = packed pointer and frame type (lower 3 bits = type, rest = pointer)
+			// extra_data_a[i] = bytecode offset, source position, or frame marker
+			// extra_data_b[i] = SharedFunctionInfo pointer for fallback
 			u64 pointer_and_type = ips[i];
 			u64 delta_or_marker = stack.extra_data_a[i];
 			u64 sfi_fallback = stack.extra_data_b[i];
 			// Call Rust V8 symbolizer with SFI fallback
 			str = resolve_v8_frame((u32)pid, pointer_and_type, delta_or_marker, sfi_fallback);
-			// If symbolization failed, use placeholder
-			if (str == NULL || strlen(str) == 0) {
-				if (str != NULL) {
-					free(str);
-				}
+			if (str == NULL) {
+				// Fallback if symbolization failed
 				char v8_symbol[256];
 				u8 frame_type = pointer_and_type & V8_FILE_TYPE_MASK;
 				snprintf(v8_symbol, sizeof(v8_symbol), "V8:type%d@%llx+%llx",
@@ -643,25 +642,15 @@ static char *build_stack_trace_string(struct bpf_tracer *t,
 			u64 zend_function_ptr = ips[i];
 			u64 lineno_and_type = stack.extra_data_a[i];
 			u64 is_jit = stack.extra_data_b[i];
-			// Call Rust PHP symbolizer (handles JIT suffix and top-level code internally)
-			char *rust_str = resolve_php_frame((u32)pid, zend_function_ptr, lineno_and_type, is_jit);
-			// Copy Rust string to C-managed memory
-			// This is necessary because symbol_array strings are freed with clib_mem_free
-			// but Rust strings must be freed with libc free()
-			if (rust_str != NULL) {
-				int len = strlen(rust_str);
-				str = clib_mem_alloc_aligned("php_symbol", len + 1, 0, NULL);
-				if (str) {
-					strcpy(str, rust_str);
-				}
-				// Free the Rust-allocated string using libc free
-				free(rust_str);
-			} else {
-				// Fallback if Rust returned NULL
+			// Call Rust PHP symbolizer (now returns clib_mem allocated string like V8)
+			str = resolve_php_frame((u32)pid, zend_function_ptr, lineno_and_type, is_jit);
+			if (str == NULL) {
+				// Fallback if symbolization failed
 				char php_symbol[256];
+				u32 type_info = (u32)(lineno_and_type >> 32);
 				u32 lineno = (u32)(lineno_and_type & 0xFFFFFFFF);
-				snprintf(php_symbol, sizeof(php_symbol), "PHP@%llx:%llu",
-				        (unsigned long long)zend_function_ptr, (unsigned long long)lineno);
+				snprintf(php_symbol, sizeof(php_symbol), "PHP:type%u@%llx:%llu",
+				        type_info, (unsigned long long)zend_function_ptr, (unsigned long long)lineno);
 				int len = strlen(php_symbol);
 				str = clib_mem_alloc_aligned("php_symbol", len + 1, 0, NULL);
 				if (str) {

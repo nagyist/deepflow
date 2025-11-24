@@ -219,11 +219,13 @@ int pre_python_unwind(void *ctx, unwind_state_t * state,
 
 static inline __attribute__ ((always_inline))
 int pre_php_unwind(void *ctx, unwind_state_t * state,
-		 map_group_t *maps, int jmp_idx);
+		 map_group_t *maps, int jmp_idx,
+		 php_unwind_info_t *php_unwind_info);
 
 static inline __attribute__ ((always_inline))
 int pre_v8_unwind(void *ctx, unwind_state_t * state,
-		 map_group_t *maps, int jmp_idx);
+		 map_group_t *maps, int jmp_idx,
+		 v8_proc_info_t *v8_unwind_info);
 
 #else
 
@@ -565,14 +567,8 @@ int collect_stack_and_send_output(struct pt_regs *ctx,
 	}
 
 	if (intp_stack != NULL && intp_stack->len > 0) {
-		// Use custom_stack_map for interpreter stack to enable symbol resolution
-		struct bpf_map_def *intp_stack_map = NULL;
-		if (!((*transfer_count_ptr) & 0x1ULL)) {
-			intp_stack_map = maps->custom_stack_map_a;
-		} else {
-			intp_stack_map = maps->custom_stack_map_b;
-		}
-		key->intpstack = get_stackid(intp_stack_map, intp_stack);
+		// Reuse stack_map (custom_stack_map_a/b) for interpreter stack
+		key->intpstack = get_stackid(stack_map, intp_stack);
 	}
 #endif
 
@@ -709,13 +705,13 @@ PERF_EVENT_PROG(oncpu_profile) (struct bpf_perf_event_data * ctx) {
 	php_unwind_info_t *php_unwind_info =
 	    php_unwind_info_map__lookup(&state->key.tgid);
 	if (php_unwind_info != NULL) {
-		pre_php_unwind(ctx, state, &oncpu_maps, PROG_DWARF_UNWIND_BEFORE_PHP_PE_IDX);
+		pre_php_unwind(ctx, state, &oncpu_maps, PROG_DWARF_UNWIND_BEFORE_PHP_PE_IDX, php_unwind_info);
 	}
 
 	v8_proc_info_t *v8_unwind_info =
 	    v8_unwind_info_map__lookup(&state->key.tgid);
 	if (v8_unwind_info != NULL) {
-		pre_v8_unwind(ctx, state, &oncpu_maps, PROG_DWARF_UNWIND_BEFORE_V8_PE_IDX);
+		pre_v8_unwind(ctx, state, &oncpu_maps, PROG_DWARF_UNWIND_BEFORE_V8_PE_IDX, v8_unwind_info);
 	}
 
 	// TODO: 如果 tgid（PID）在 lua 的 map 中，调用 lua 剖析的程序（可以参考 pre_python_unwind 的实现）
@@ -1185,8 +1181,15 @@ PROGPE(python_unwind) (struct bpf_perf_event_data * ctx) {
 		      PROG_ONCPU_OUTPUT_PE_IDX);
 	return 0;
 }
-// Helper function to detect if we've encountered JIT code in the call stack
-// Implementation based on multiple PHP JIT characteristics
+// Helper function to detect if PC is at the JIT return point within execute_ex.
+//
+// This handles an edge case in JIT detection: when PC is inside execute_ex but
+// at the exact instruction right after the JMP that calls JIT code. At this point,
+// the code just returned from JIT and may need special handling (e.g., ARM64 SP
+// adjustment).
+//
+// Note: The primary JIT detection is done via `!pc_in_execute_ex` check in
+// php_unwind(). This function only supplements that for the boundary case.
 static inline __attribute__ ((always_inline))
 bool is_php_jit_frame(unwind_state_t *state, void *current_pc) {
 	// If no JIT return address is configured, no JIT support available
@@ -1194,32 +1197,55 @@ bool is_php_jit_frame(unwind_state_t *state, void *current_pc) {
 		return false;
 	}
 
-	// Strategy 1: Check if current PC matches known JIT return address
-	if ((__u64)current_pc == state->php_jit_return_address) {
-		return true;
+	// Check if PC is at the JIT return address (instruction after JMP in execute_ex)
+	// This indicates we just returned from JIT code execution
+	return (__u64)current_pc == state->php_jit_return_address;
+}
+
+// Common function for DWARF unwinding before interpreter (PHP/V8) unwinding.
+// If DWARF info is available, perform native stack unwinding first.
+// Otherwise, fall back directly to interpreter unwinder.
+static inline __attribute__ ((always_inline))
+int dwarf_unwind_before_interp(void *ctx, int fallback_jmp_idx) {
+	__u32 count_idx = ERROR_IDX;
+	__u64 *error_count_ptr = profiler_state_map__lookup(&count_idx);
+
+	if (error_count_ptr == NULL) {
+		__u64 err_val = 1;
+		profiler_state_map__update(&count_idx, &err_val);
+		return -1;
 	}
 
-	// Strategy 2: More restrictive JIT region detection
-	// Only consider it JIT if we're in a high memory region AND close to JIT return address
-	__u64 pc_addr = (__u64)current_pc;
-	if (pc_addr > 0x7f0000000000ULL && state->php_jit_return_address > 0x7f0000000000ULL) {
-		// Check if PC is within reasonable distance of JIT return address (same memory segment)
-		__u64 distance = (pc_addr > state->php_jit_return_address) ?
-			(pc_addr - state->php_jit_return_address) :
-			(state->php_jit_return_address - pc_addr);
-		if (distance < 0x10000ULL) { // Within 64KB - much more restrictive
-			return true;
-		}
+	__u32 zero = 0;
+	unwind_state_t *state = heap__lookup(&zero);
+	if (state == NULL) {
+		return 0;
 	}
 
-	return false;
+	// Check if DWARF unwinding is available
+	process_shard_list_t *shard_list =
+	    process_shard_list_table__lookup(&state->key.tgid);
+	if (shard_list != NULL) {
+		// DWARF unwinding is available, try to unwind native frames first
+		state->key.flags |= STACK_TRACE_FLAGS_DWARF;
+		state->runs = 0;
+
+		// Tail call to DWARF unwinder
+		bpf_tail_call(ctx, &NAME(cp_progs_jmp_pe_map),
+			      PROG_DWARF_UNWIND_PE_IDX);
+		__sync_fetch_and_add(error_count_ptr, 1);
+		return 0;
+	}
+
+	// No DWARF unwinding, go directly to interpreter unwinder
+	bpf_tail_call(ctx, &NAME(cp_progs_jmp_pe_map), fallback_jmp_idx);
+	return 0;
 }
 
 static inline __attribute__ ((always_inline))
 int pre_php_unwind(void *ctx, unwind_state_t * state,
-		 map_group_t *maps, int jmp_idx) {
-	php_unwind_info_t *php_unwind_info =
-	    php_unwind_info_map__lookup(&state->key.tgid);
+		 map_group_t *maps, int jmp_idx,
+		 php_unwind_info_t *php_unwind_info) {
 	if (php_unwind_info == NULL) {
         return 0;
 	}
@@ -1269,13 +1295,15 @@ int php_unwind(void *ctx, unwind_state_t * state,
 		goto output;
 	}
 
-	// Lightweight JIT detection based on current PC vs execute_ex range
+	// JIT detection: PHP 8+ JIT code runs outside execute_ex function.
+	// Primary detection: check if PC is outside the execute_ex address range.
+	// Edge case: PC may be at the JIT return point (just after JMP instruction
+	// in execute_ex), which is_php_jit_frame() handles.
 	__u64 ip = state->regs.ip;
 	bool pc_in_execute_ex = (state->php_execute_ex_start != 0 &&
 					 state->php_execute_ex_end != 0 &&
 					 ip >= state->php_execute_ex_start &&
 					 ip < state->php_execute_ex_end);
-	// Consider samples outside execute_ex() as JIT; gate by has_jit flag
 	bool sample_is_jit = state->php_has_jit &&
 	    (!pc_in_execute_ex || is_php_jit_frame(state, (void *)ip));
 
@@ -1289,6 +1317,8 @@ int php_unwind(void *ctx, unwind_state_t * state,
 	// Given that there's no guarantee that anything pushed to the stack is useful, we
 	// simply ignore it. There may be a return address in some modes, but this is hard to detect
 	// consistently.
+	// Note: If BP is 0 or invalid, SP will be set accordingly. Subsequent DWARF unwinding
+	// will fail gracefully when bpf_probe_read_user() attempts to read from invalid address.
 	if (sample_is_jit) {
 		state->regs.sp = state->regs.bp;
 	}
@@ -1357,47 +1387,9 @@ output:
 
 // eBPF Program Entry: DWARF Unwind Before PHP
 // This program performs DWARF unwinding before PHP interpreter unwinding
-// to capture the complete native stack trace (similar to V8 approach)
+// to capture the complete native stack trace
 PROGPE(dwarf_unwind_before_php) (struct bpf_perf_event_data *ctx) {
-	__u32 count_idx;
-
-	count_idx = ERROR_IDX;
-	__u64 *error_count_ptr = profiler_state_map__lookup(&count_idx);
-
-	if (error_count_ptr == NULL) {
-		count_idx = ERROR_IDX;
-		__u64 err_val = 1;
-		profiler_state_map__update(&count_idx, &err_val);
-		return -1;
-	}
-
-	__u32 zero = 0;
-	unwind_state_t *state = heap__lookup(&zero);
-	if (state == NULL) {
-		return 0;
-	}
-
-	// Check if DWARF unwinding is available
-	process_shard_list_t *shard_list =
-	    process_shard_list_table__lookup(&state->key.tgid);
-	if (shard_list != NULL) {
-		// DWARF unwinding is available, try to unwind native frames first
-		state->key.flags |= STACK_TRACE_FLAGS_DWARF;
-
-		// Reset runs counter for DWARF unwinding
-		state->runs = 0;
-
-		// Tail call to DWARF unwinder
-		bpf_tail_call(ctx, &NAME(cp_progs_jmp_pe_map),
-			      PROG_DWARF_UNWIND_PE_IDX);
-		__sync_fetch_and_add(error_count_ptr, 1);
-		return 0;
-	}
-
-	// No DWARF unwinding, go directly to PHP unwinder
-	bpf_tail_call(ctx, &NAME(cp_progs_jmp_pe_map),
-		      PROG_PHP_UNWIND_PE_IDX);
-	return 0;
+	return dwarf_unwind_before_interp(ctx, PROG_PHP_UNWIND_PE_IDX);
 }
 
 PROGPE(php_unwind) (struct bpf_perf_event_data * ctx) {
@@ -1749,10 +1741,8 @@ unwind_frame:
 // V8 stack unwinding preprocessing function
 static inline __attribute__((always_inline))
 int pre_v8_unwind(void *ctx, unwind_state_t *state,
-                  map_group_t *maps, int jmp_idx) {
-	// Check if V8 unwinding info exists (following Python/PHP pattern)
-	v8_proc_info_t *v8_unwind_info =
-	    v8_unwind_info_map__lookup(&state->key.tgid);
+                  map_group_t *maps, int jmp_idx,
+                  v8_proc_info_t *v8_unwind_info) {
 	if (v8_unwind_info == NULL) {
 		return 0;
 	}
@@ -1804,46 +1794,7 @@ output:
 // eBPF Program Entry: DWARF Unwind Before V8
 // This program first tries to unwind native stack frames before V8 interpreter frames
 PROGPE(dwarf_unwind_before_v8) (struct bpf_perf_event_data *ctx) {
-	__u32 count_idx;
-
-	count_idx = ERROR_IDX;
-	__u64 *error_count_ptr = profiler_state_map__lookup(&count_idx);
-
-	if (error_count_ptr == NULL) {
-		count_idx = ERROR_IDX;
-		__u64 err_val = 1;
-		profiler_state_map__update(&count_idx, &err_val);
-		return -1;
-	}
-
-	__u32 zero = 0;
-	unwind_state_t *state = heap__lookup(&zero);
-	if (state == NULL) {
-		return 0;
-	}
-
-	// Check if DWARF unwinding is available
-	process_shard_list_t *shard_list =
-	    process_shard_list_table__lookup(&state->key.tgid);
-
-	if (shard_list != NULL) {
-		// DWARF unwinding is available, try to unwind native frames first
-		state->key.flags |= STACK_TRACE_FLAGS_DWARF;
-
-		// Reset runs counter for DWARF unwinding
-		state->runs = 0;
-
-		// Tail call to DWARF unwinder
-		bpf_tail_call(ctx, &NAME(cp_progs_jmp_pe_map),
-		              PROG_DWARF_UNWIND_PE_IDX);
-		__sync_fetch_and_add(error_count_ptr, 1);
-		return 0;
-	}
-
-	// No DWARF unwinding, go directly to V8 unwinder
-	bpf_tail_call(ctx, &NAME(cp_progs_jmp_pe_map),
-	              PROG_V8_UNWIND_PE_IDX);
-	return 0;
+	return dwarf_unwind_before_interp(ctx, PROG_V8_UNWIND_PE_IDX);
 }
 
 // eBPF Program Entry: V8 Unwind

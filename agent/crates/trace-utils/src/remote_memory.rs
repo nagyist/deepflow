@@ -65,6 +65,20 @@ impl RemoteMemory {
             iov_len: buffer.len(),
         };
 
+        // SAFETY: This unsafe call to process_vm_readv is safe because:
+        // 1. Local buffer safety:
+        //    - `local_iov.iov_base` points to valid memory from `buffer.as_mut_ptr()`
+        //    - `local_iov.iov_len` equals `buffer.len()`, ensuring no buffer overflow
+        //    - Rust's borrow checker guarantees the buffer remains valid during this call
+        //    - No other code can access the buffer (exclusive mutable borrow)
+        // 2. Parameter validity:
+        //    - `&local_iov` and `&remote_iov` are valid stack references
+        //    - Both iov counts are 1, matching the single iovec structures provided
+        //    - `self.pid` is a valid process ID (u32 -> pid_t conversion is safe)
+        // 3. Error handling:
+        //    - System call failures are properly handled via return value checking
+        //    - Remote address validity is not guaranteed, but failures are converted to Rust errors
+        //    - No undefined behavior occurs even if remote memory is inaccessible
         let bytes_read = unsafe {
             process_vm_readv(
                 self.pid,
@@ -99,16 +113,69 @@ impl RemoteMemory {
 
     /// Read a value of type T from the remote process.
     ///
+    /// This function reads sizeof(T) bytes from the remote process and interprets them as type T.
+    /// It uses mem::zeroed() to create the initial value, which requires careful type selection.
+    ///
     /// # Safety
     /// The caller must ensure that:
     /// - The address is valid and aligned for type T
     /// - Reading sizeof(T) bytes from address is safe
     /// - The memory layout of T is compatible between processes
+    ///
+    /// ## How callers ensure safety when calling read_value<T>:
+    ///
+    /// ### 1. Type Safety (mem::zeroed() compatibility)
+    /// Callers only use primitive types (u8, u16, u32, u64, i8, i16, i32, i64) for T,
+    /// which are always safe for mem::zeroed(). Types like bool, char, enums, NonNull<T>,
+    /// references, and function pointers are never used.
+    ///
+    /// ### 2. Address Validity and Alignment
+    /// Callers validate addresses through multiple layers:
+    /// - eBPF pre-validation: addresses originate from kernel-verified stack unwinding
+    /// - Object tag validation: V8 heap object tags are checked before dereferencing
+    /// - Known safe offsets: field addresses are computed from validated base addresses
+    ///   plus compile-time constant offsets from V8 internal structure analysis
+    ///
+    /// ### 3. Memory Layout Compatibility
+    /// Callers use version-specific offset tables (e.g., V8_11_OFFSETS, V8_12_OFFSETS)
+    /// to ensure the memory layout matches between the profiler and target process.
+    /// The target process architecture is assumed to match (same endianness, pointer size).
+    ///
+    /// ### 4. Error Handling
+    /// All read_value calls propagate errors via Result, allowing callers to handle
+    /// failures gracefully (e.g., return unknown frame info) rather than causing
+    /// undefined behavior.
+    ///
+    /// ## Why not validate internally?
+    /// - **Performance**: This is a hot path called thousands of times per second
+    /// - **Context**: Callers have better domain knowledge for validation
+    /// - **Flexibility**: Different use cases have different safety requirements
+    /// - **Technical limits**: Some checks (like remote address validity) are impossible
+    ///   without actually performing the read operation
     pub unsafe fn read_value<T>(&self, address: u64) -> Result<T>
     where
         T: Copy,
     {
+        // SAFETY: This function is marked unsafe because the caller must ensure:
+        // 1. Type T safety with mem::zeroed():
+        //    - T must be a type where all-zero bytes represent a valid value
+        //    - This is safe for primitive types (u8, u16, u32, u64, i8, i16, i32, i64, f32, f64)
+        //    - This is NOT safe for types like bool, char, enums, or types with invalid bit patterns
+        // 2. Remote memory layout compatibility:
+        //    - The remote process must have the same memory layout for type T
+        //    - Same endianness, same size, same alignment requirements
+        //    - This is typically guaranteed when reading from the same architecture
+        // 3. Address validity and alignment:
+        //    - `address` must point to valid memory in the remote process
+        //    - `address` must be properly aligned for type T
+        //    - The remote process must have at least sizeof(T) bytes available at `address`
         let mut value: T = mem::zeroed();
+
+        // SAFETY: Creating a slice from a single T value is safe because:
+        // - `&mut value` points to valid, initialized memory (stack allocated)
+        // - The slice length exactly matches the size of T
+        // - The memory remains valid for the duration of read_at call
+        // - T: Copy ensures no Drop implementation that could be affected by the raw bytes
         let buffer =
             std::slice::from_raw_parts_mut(&mut value as *mut T as *mut u8, mem::size_of::<T>());
         self.read_at(address, buffer)?;
@@ -194,6 +261,22 @@ impl RemoteMemory {
             });
         }
 
+        // SAFETY: This unsafe call to process_vm_readv is safe because:
+        // 1. Local buffer safety:
+        //    - All `local_iovs` entries point to valid memory from `buf.as_mut_ptr()`
+        //    - Each `iov_len` matches the corresponding buffer's actual length
+        //    - Rust's borrow checker ensures all buffers remain valid during this call
+        //    - Exclusive mutable borrows prevent concurrent access to any buffer
+        // 2. Vector safety:
+        //    - `local_iovs.as_ptr()` and `remote_iovs.as_ptr()` point to valid Vec data
+        //    - Both vectors have the same length, ensuring parameter consistency
+        //    - Vector lengths are converted to u64 safely (usize -> u64 is always safe)
+        // 3. Parameter validity:
+        //    - `self.pid` is a valid process ID
+        //    - All iovec structures are properly initialized from valid Rust slices
+        // 4. Error handling:
+        //    - System call failures return negative values, handled by error checking
+        //    - Remote address validity is not guaranteed, but handled via Result type
         let bytes_read = unsafe {
             process_vm_readv(
                 self.pid,

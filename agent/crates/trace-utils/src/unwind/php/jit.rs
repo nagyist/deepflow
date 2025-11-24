@@ -371,5 +371,4 @@ impl PhpJitSupport {
 }
 
 #[cfg(test)]
-#[path = "php/jit_tests.rs"]
-mod jit_tests;
+mod tests;

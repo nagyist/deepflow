@@ -366,5 +366,4 @@ impl PhpOpcacheSupport {
 }
 
 #[cfg(test)]
-#[path = "php/opcache_tests.rs"]
-mod opcache_tests;
+mod tests;
