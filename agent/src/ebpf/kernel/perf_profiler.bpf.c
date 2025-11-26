@@ -126,13 +126,59 @@ MAP_HASH(unwind_entry_shard_table, __u32, unwind_entry_shard_t, 1, FEATURE_FLAG_
  */
 MAP_ARRAY(unwind_sysinfo, __u32, unwind_sysinfo_t, 1, FEATURE_FLAG_DWARF_UNWINDING)
 
+/*
+ * Interpreter Unwinding Maps
+ *
+ * These maps store per-process unwinding information for different interpreters.
+ *
+ * Data lifecycle:
+ *   - Added:   When a process is detected as an interpreter (PHP/Python/V8)
+ *              via is_*_process() check and *_unwind_table_load() call
+ *   - Removed: When the process exits, via process_execute_event()
+ *              calling *_unwind_table_unload()
+ *
+ * Memory allocation (BPF_MAP_TYPE_HASH with pre-allocation):
+ *   - At map creation: All max_entries elements are pre-allocated by the kernel
+ *     (Note: perf_event programs cannot use BPF_F_NO_PREALLOC, must pre-allocate)
+ *   - At runtime: Entries are marked as used/unused, no dynamic allocation
+ *   - At cleanup: Entries are marked as free, but memory remains allocated
+ *
+ * Total memory usage (pre-allocated at map creation):
+ *   All interpreter maps:     ~17-20 MB (pre-allocated for 65536 processes)
+ *   Per-process overhead:     ~94 bytes (largest: v8_proc_info_t)
+ *   Empty vs Full:            Same memory footprint (all pre-allocated)
+ *
+ * Capacity and configuration:
+ *   - *_unwind_info_map: 65536 max entries (supports large-scale containerized environments)
+ *   - *_offsets_map: Small fixed size (version-specific offset tables, shared across processes)
+ *   - Currently hardcoded in BPF code (not configurable at runtime)
+ *   - To increase capacity, modify max_entries below and rebuild
+ */
+
+// Python: stores thread state address for stack unwinding
+// - python_tstate_addr_map: key=PID, value=thread_state_address (per-thread)
+//   Pre-allocated: 65536 * (4 + 8 + 32) ≈ 2.8 MB (htab_elem overhead included)
+// - python_unwind_info_map: key=PID, value=python_unwind_info_t (per-process)
+//   Pre-allocated: 65536 * (4 + 16 + 32) ≈ 3.3 MB (htab_elem overhead included)
+// - python_offsets_map: key=offsets_id, value=python_offsets_t (per-version, reference counted)
+//   Supports 1 Python version at a time (upgrades replace entry)
+//   Pre-allocated: 1 * (1 + 216 + 32) ≈ 249 bytes
 MAP_HASH(python_tstate_addr_map, __u32, __u64, 65536, FEATURE_FLAG_PROFILE)
 MAP_HASH(python_unwind_info_map, __u32, python_unwind_info_t, 65536, FEATURE_FLAG_PROFILE)
 MAP_HASH(python_offsets_map, __u8, python_offsets_t, 1, FEATURE_FLAG_PROFILE)
 
+// PHP: stores executor_globals address, JIT info, and execute_ex range
+// - php_unwind_info_map: key=PID, value=php_unwind_info_t (per-process)
+//   Pre-allocated: 65536 * (4 + 40 + 32) ≈ 4.9 MB (htab_elem overhead included)
+// - php_offsets_map: key=offsets_id (0-3), value=php_offsets_t (per-version, reference counted)
+//   Supports up to 4 different PHP versions simultaneously
+//   Pre-allocated: 4 * (1 + 48 + 32) ≈ 324 bytes
 MAP_HASH(php_unwind_info_map, __u32, php_unwind_info_t, 65536, FEATURE_FLAG_PROFILE)
 MAP_HASH(php_offsets_map, __u8, php_offsets_t, 4, FEATURE_FLAG_PROFILE)
 
+// V8/Node.js: stores isolate info and V8 internal structure offsets
+// - key=PID, value=v8_proc_info_t (per-process, includes version-specific offsets)
+//   Pre-allocated: 65536 * (4 + 64 + 32) ≈ 6.4 MB (htab_elem overhead included)
 MAP_HASH(v8_unwind_info_map, __u32, v8_proc_info_t, 65536, FEATURE_FLAG_PROFILE)
 
 struct bpf_map_def SEC("maps") __symbol_table = {
