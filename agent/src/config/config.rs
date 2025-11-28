@@ -1147,6 +1147,24 @@ impl Default for Unwinding {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EbpfProfileLanguages {
+    pub python_disabled: bool,
+    pub php_disabled: bool,
+    pub nodejs_disabled: bool,
+}
+
+impl Default for EbpfProfileLanguages {
+    fn default() -> Self {
+        Self {
+            python_disabled: false,
+            php_disabled: false,
+            nodejs_disabled: false,
+        }
+    }
+}
+
 #[derive(Clone, Default, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct EbpfProfile {
@@ -1155,6 +1173,7 @@ pub struct EbpfProfile {
     pub memory: EbpfProfileMemory,
     pub unwinding: Unwinding,
     pub preprocess: EbpfProfilePreprocess,
+    pub languages: EbpfProfileLanguages,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]

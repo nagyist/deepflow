@@ -4931,6 +4931,142 @@ inputs:
 ingester 的 CPU 开销，但是 Agent 也会因此消耗更多的 CPU。测试表明，将deepflow-agent 自身的
 on-cpu 函数调用栈压缩，可以将带宽消耗降低 `x` 倍，但会使得 agent 额外消耗 `y%` 的 CPU。
 
+#### 语言特定剖析 {#inputs.ebpf.profile.languages}
+
+##### 禁用 Python 剖析 {#inputs.ebpf.profile.languages.python_disabled}
+
+**标签**:
+
+<mark>agent_restart</mark>
+
+**FQCN**:
+
+`inputs.ebpf.profile.languages.python_disabled`
+
+**默认值**:
+```yaml
+inputs:
+  ebpf:
+    profile:
+      languages:
+        python_disabled: false
+```
+
+**模式**:
+| Key  | Value                        |
+| ---- | ---------------------------- |
+| Type | bool |
+
+**详细描述**:
+
+禁用 Python 解释器剖析功能。禁用后将不会采集 Python 进程的函数调用栈，可节省约 6.1 MB 的内核内存。
+
+此配置项控制以下 eBPF maps 的创建：
+- `python_tstate_addr_map`：存储线程状态地址 (~2.8 MB)
+- `python_unwind_info_map`：存储进程级 unwinding 信息 (~3.3 MB)
+- `python_offsets_map`：存储版本特定的内存布局偏移量 (~249 bytes)
+
+适用场景：
+- 环境中确定不运行 Python 应用
+- 仅关注其他语言（PHP、Node.js、Java、Go 等）的性能分析
+- 内存受限的环境需要优化资源使用
+
+**重要提示**：修改此配置将自动触发 deepflow-agent 重启，因为 eBPF maps 无法在运行时动态创建或销毁。
+
+##### 禁用 PHP 剖析 {#inputs.ebpf.profile.languages.php_disabled}
+
+**标签**:
+
+<mark>agent_restart</mark>
+
+**FQCN**:
+
+`inputs.ebpf.profile.languages.php_disabled`
+
+**默认值**:
+```yaml
+inputs:
+  ebpf:
+    profile:
+      languages:
+        php_disabled: false
+```
+
+**模式**:
+| Key  | Value                        |
+| ---- | ---------------------------- |
+| Type | bool |
+
+**详细描述**:
+
+禁用 PHP 解释器剖析功能。禁用后将不会采集 PHP 进程的函数调用栈，可节省约 5.2 MB 的内核内存。
+
+此配置项控制以下 eBPF maps 的创建：
+- `php_unwind_info_map`：存储进程级 unwinding 信息，包括 executor_globals 地址、JIT 信息等 (~4.9 MB)
+- `php_offsets_map`：存储版本特定的内存布局偏移量，支持最多 4 个不同的 PHP 版本 (~324 bytes)
+
+适用场景：
+- 环境中确定不运行 PHP 应用
+- 仅关注其他语言的性能分析
+- 内存受限的环境需要优化资源使用
+
+**重要提示**：修改此配置将自动触发 deepflow-agent 重启，因为 eBPF maps 无法在运行时动态创建或销毁。
+
+##### 禁用 Node.js 剖析 {#inputs.ebpf.profile.languages.nodejs_disabled}
+
+**标签**:
+
+<mark>agent_restart</mark>
+
+**FQCN**:
+
+`inputs.ebpf.profile.languages.nodejs_disabled`
+
+**默认值**:
+```yaml
+inputs:
+  ebpf:
+    profile:
+      languages:
+        nodejs_disabled: false
+```
+
+**模式**:
+| Key  | Value                        |
+| ---- | ---------------------------- |
+| Type | bool |
+
+**详细描述**:
+
+禁用 Node.js (V8 引擎) 剖析功能。禁用后将不会采集 Node.js 进程的函数调用栈，可节省约 6.4 MB 的内核内存。
+
+此配置项控制以下 eBPF map 的创建：
+- `v8_unwind_info_map`：存储进程级 unwinding 信息，包括 V8 内部结构偏移量 (~6.4 MB)
+
+适用场景：
+- 环境中确定不运行 Node.js 应用
+- 仅关注其他语言的性能分析
+- 内存受限的环境需要优化资源使用
+
+**重要提示**：修改此配置将自动触发 deepflow-agent 重启，因为 eBPF maps 无法在运行时动态创建或销毁。
+
+**内存节省效果总结**：
+
+| 配置方式 | Python | PHP | Node.js | 总计内存占用 | 节省内存 |
+| -------- | ------ | --- | ------- | ----------- | -------- |
+| 全部启用（默认） | 6.1 MB | 5.2 MB | 6.4 MB | ~17-20 MB | 0 MB |
+| 仅 Python | 6.1 MB | 0 MB | 0 MB | ~6.1 MB | ~11-14 MB |
+| 仅 PHP | 0 MB | 5.2 MB | 0 MB | ~5.2 MB | ~12-15 MB |
+| 仅 Node.js | 0 MB | 0 MB | 6.4 MB | ~6.4 MB | ~11-14 MB |
+| 全部禁用 | 0 MB | 0 MB | 0 MB | ~0 MB | ~17-20 MB |
+
+**注意事项**：
+- 修改语言开关需要重启 deepflow-agent 才能生效
+- eBPF maps 使用预分配机制，空载和满载占用相同的内核内存
+- 禁用时，对应语言的 eBPF maps 会被创建但 max_entries 设为 1（最小化内存占用）
+- 禁用时，不会创建对应语言的 unwind table，也不会加载进程的 unwinding 信息
+- 禁用不需要的语言除了节省内存，还能减少 CPU 开销
+
 ### 调优 {#inputs.ebpf.tunning}
 
 #### 采集队列大小 {#inputs.ebpf.tunning.collector_queue_size}

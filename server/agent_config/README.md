@@ -5060,6 +5060,112 @@ it also increases the CPU usage of the agent. Tests have shown that compressing 
 function call stack of the deepflow-agent can reduce bandwidth consumption by `x` times, but
 it will result in an additional `y%` CPU usage for the agent.
 
+#### Language-specific Profiling {#inputs.ebpf.profile.languages}
+
+##### Python profiling disabled {#inputs.ebpf.profile.languages.python_disabled}
+
+**Tags**:
+
+<mark>agent_restart</mark>
+
+**FQCN**:
+
+`inputs.ebpf.profile.languages.python_disabled`
+
+**Default value**:
+```yaml
+inputs:
+  ebpf:
+    profile:
+      languages:
+        python_disabled: false
+```
+
+**Schema**:
+| Key  | Value                        |
+| ---- | ---------------------------- |
+| Type | bool |
+
+**Description**:
+
+Disable Python interpreter profiling. When disabled, Python process stack traces will not be collected, saving approximately 6.1 MB of kernel memory (python_tstate_addr_map, python_unwind_info_map, python_offsets_map).
+
+**Important**: Changing this configuration will automatically trigger deepflow-agent restart, as eBPF maps cannot be dynamically created or destroyed at runtime.
+
+##### PHP profiling disabled {#inputs.ebpf.profile.languages.php_disabled}
+
+**Tags**:
+
+<mark>agent_restart</mark>
+
+**FQCN**:
+
+`inputs.ebpf.profile.languages.php_disabled`
+
+**Default value**:
+```yaml
+inputs:
+  ebpf:
+    profile:
+      languages:
+        php_disabled: false
+```
+
+**Schema**:
+| Key  | Value                        |
+| ---- | ---------------------------- |
+| Type | bool |
+
+**Description**:
+
+Disable PHP interpreter profiling. When disabled, PHP process stack traces will not be collected, saving approximately 5.2 MB of kernel memory (php_unwind_info_map, php_offsets_map).
+
+**Important**: Changing this configuration will automatically trigger deepflow-agent restart, as eBPF maps cannot be dynamically created or destroyed at runtime.
+
+##### Node.js profiling disabled {#inputs.ebpf.profile.languages.nodejs_disabled}
+
+**Tags**:
+
+<mark>agent_restart</mark>
+
+**FQCN**:
+
+`inputs.ebpf.profile.languages.nodejs_disabled`
+
+**Default value**:
+```yaml
+inputs:
+  ebpf:
+    profile:
+      languages:
+        nodejs_disabled: false
+```
+
+**Schema**:
+| Key  | Value                        |
+| ---- | ---------------------------- |
+| Type | bool |
+
+**Description**:
+
+Disable Node.js (V8) interpreter profiling. When disabled, Node.js process stack traces will not be collected, saving approximately 6.4 MB of kernel memory (v8_unwind_info_map).
+
+**Important**: Changing this configuration will automatically trigger deepflow-agent restart, as eBPF maps cannot be dynamically created or destroyed at runtime.
+
+**Memory saving summary**:
+- All enabled (default): ~17-20 MB
+- Python only: ~6.1 MB (saves ~11-14 MB)
+- PHP only: ~5.2 MB (saves ~12-15 MB)
+- Node.js only: ~6.4 MB (saves ~11-14 MB)
+- All disabled: ~0 MB (saves ~17-20 MB)
+
+**Notes**:
+- Changing language switches requires deepflow-agent restart
+- eBPF maps use pre-allocation mechanism (same memory usage whether empty or full)
+- When disabled, language-specific eBPF maps are created with max_entries=1 (minimized memory)
+- When disabled, unwind tables are not created and process unwinding info is not loaded
+- Disabling unused languages saves memory and reduces CPU overhead
+
 ### Tunning {#inputs.ebpf.tunning}
 
 #### Collector Queue Size {#inputs.ebpf.tunning.collector_queue_size}
